@@ -1,0 +1,94 @@
+body { font-family: 'Kanit', sans-serif; background-color: #15151e; }
+h1, h2, h3, .f1-font { font-family: 'Titillium Web', sans-serif; }
+
+/* Custom Scrollbar */
+::-webkit-scrollbar { width: 8px; }
+::-webkit-scrollbar-track { background: #1f1f2e; }
+::-webkit-scrollbar-thumb { background: #e10600; border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: #ff1801; }
+
+.loader {
+    border: 3px solid #f3f3f3;
+    border-radius: 50%;
+    border-top: 3px solid #dc2626;
+    width: 24px;
+    height: 24px;
+    -webkit-animation: spin 1s linear infinite; /* Safari */
+    animation: spin 1s linear infinite;
+    margin: 0 auto;
+}
+@keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+
+/* Glassmorphism Card */
+.glass-card {
+    background: rgba(30, 30, 40, 0.7);
+    backdrop-filter: blur(10px);
+    border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+/* Live Dashboard Overlay */
+.dashboard-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background-color: #0b0b0f; /* Darker background */
+    z-index: 100;
+    display: flex;
+    flex-direction: column;
+    transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    transform: translateY(100%); /* ซ่อนไว้ข้างล่าง */
+}
+
+.dashboard-overlay.active {
+    transform: translateY(0); /* เลื่อนขึ้นมาแสดง */
+}
+
+/* Timing Table Styles */
+.timing-table {
+    width: 100%;
+    border-collapse: separate;
+    border-spacing: 0;
+    font-family: 'Titillium Web', sans-serif;
+    font-variant-numeric: tabular-nums; /* ตัวเลขกว้างเท่ากัน */
+}
+
+.timing-table th {
+    text-align: left;
+    padding: 12px 8px;
+    background-color: #15151e;
+    color: #6b7280;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    border-bottom: 2px solid #2a2a35;
+}
+
+.timing-table td {
+    padding: 8px;
+    border-bottom: 1px solid #1f1f2e;
+    font-size: 14px;
+    color: #e5e7eb;
+}
+
+.timing-row:hover td {
+    background-color: rgba(255, 255, 255, 0.03);
+}
+
+.sector-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    margin-right: 4px;
+}
+.bg-sector-green { background-color: #22c55e; box-shadow: 0 0 5px rgba(34, 197, 94, 0.5); }
+.bg-sector-yellow { background-color: #eab308; }
+.bg-sector-purple { background-color: #a855f7; box-shadow: 0 0 5px rgba(168, 85, 247, 0.5); }

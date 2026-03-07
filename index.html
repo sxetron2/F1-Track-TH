@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>F1 INSIDER - Next Gen Tracker</title>
+    
+    <!-- เรียกใช้ Tailwind CSS ผ่าน CDN (ไม่ต้องติดตั้ง) -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- เรียกใช้ Font Awesome สำหรับไอคอน -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+    <!-- Google Fonts: Kanit (ไทย) และ Titillium Web (อังกฤษ - สไตล์ F1) -->
+    <link href="https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;600&family=Titillium+Web:ital,wght@0,400;0,700;1,900&display=swap" rel="stylesheet">
+    
+    <!-- เรียกใช้ CSS ที่แยกไฟล์ออกมา -->
+    <link rel="stylesheet" href="f1.css">
+</head>
+<body class="text-gray-100 min-h-screen flex flex-col bg-[url('https://www.transparenttextures.com/patterns/carbon-fibre.png')]">
+
+    <!-- ส่วนหัว (Navbar) -->
+    <nav class="bg-[#e10600] shadow-2xl sticky top-0 z-50 border-b-4 border-black">
+        <div class="container mx-auto px-4 py-3 flex justify-between items-center">
+            <div class="flex items-center gap-2">
+                <i class="fa-brands fa-f1 text-3xl text-white"></i>
+                <h1 class="text-2xl font-black italic tracking-tighter text-white">INSIDER <span class="text-xs not-italic font-normal opacity-80 block -mt-1">THAILAND</span></h1>
+            </div>
+            <div class="hidden md:flex space-x-8 font-bold text-sm uppercase tracking-wider text-white">
+                <a href="#last-race" class="hover:text-black transition duration-300" data-i18n="latest">Latest</a>
+                <a href="#schedule" class="hover:text-black transition duration-300" data-i18n="schedule">Schedule</a>
+                <a href="#highlights" class="hover:text-black transition duration-300" data-i18n="highlights">Highlights</a>
+                <button onclick="toggleLanguage()" class="bg-gray-800 text-white px-3 py-1 rounded hover:bg-gray-700 transition border border-gray-600 flex items-center gap-2"><i class="fa-solid fa-language"></i> TH/EN</button>
+                <button onclick="toggleDashboard(true)" class="bg-black text-white px-3 py-1 rounded hover:bg-gray-800 transition border border-gray-700 flex items-center gap-2"><i class="fa-solid fa-chart-simple"></i> <span data-i18n="liveTiming">Live Timing</span></button>
+            </div>
+        </div>
+    </nav>
+
+    <!-- เนื้อหาหลัก -->
+    <div class="container mx-auto px-4 py-8 grid grid-cols-1 lg:grid-cols-12 gap-8 flex-grow">
+
+        <!-- คอลัมน์ซ้าย: ข่าวและตารางแข่ง -->
+        <div class="lg:col-span-8 space-y-8">
+            
+            <!-- ส่วนนับถอยหลัง (Countdown) - เพิ่มใหม่ -->
+            <section id="countdown-section" class="hidden">
+                <div class="glass-card p-6 rounded-2xl border-t-4 border-[#e10600] relative overflow-hidden shadow-[0_0_30px_rgba(225,6,0,0.15)]">
+                    <div class="absolute top-0 right-0 p-4 opacity-5 text-9xl font-black italic text-white select-none -mt-8 -mr-8 pointer-events-none">NEXT</div>
+                    
+                    <div class="relative z-10 flex flex-col md:flex-row items-center justify-between gap-6">
+                        <div class="text-center md:text-left">
+                            <div class="text-[#e10600] font-bold text-xs uppercase tracking-[0.2em] mb-2 flex items-center justify-center md:justify-start gap-2">
+                                <span class="w-2 h-2 rounded-full bg-[#e10600] animate-pulse"></span> Next Session
+                            </div>
+                            <h2 id="cd-location" class="text-3xl md:text-4xl font-black italic text-white uppercase leading-none mb-1">LOADING...</h2>
+                            <p id="cd-session" class="text-xl text-gray-300 font-bold uppercase tracking-wider">...</p>
+                        </div>
+
+                        <div id="countdown-container" class="flex gap-2 md:gap-4 text-center">
+                            <div class="bg-black/40 rounded-xl p-3 min-w-[70px] md:min-w-[80px] border border-gray-700/50 backdrop-blur-sm">
+                                <div id="cd-d" class="text-3xl md:text-4xl font-mono font-bold text-white leading-none">00</div>
+                                <div class="text-[10px] text-gray-500 uppercase mt-1 font-bold tracking-wider">Days</div>
+                            </div>
+                            <div class="bg-black/40 rounded-xl p-3 min-w-[70px] md:min-w-[80px] border border-gray-700/50 backdrop-blur-sm">
+                                <div id="cd-h" class="text-3xl md:text-4xl font-mono font-bold text-white leading-none">00</div>
+                                <div class="text-[10px] text-gray-500 uppercase mt-1 font-bold tracking-wider">Hrs</div>
+                            </div>
+                            <div class="bg-black/40 rounded-xl p-3 min-w-[70px] md:min-w-[80px] border border-gray-700/50 backdrop-blur-sm">
+                                <div id="cd-m" class="text-3xl md:text-4xl font-mono font-bold text-white leading-none">00</div>
+                                <div class="text-[10px] text-gray-500 uppercase mt-1 font-bold tracking-wider">Mins</div>
+                            </div>
+                            <div class="bg-black/40 rounded-xl p-3 min-w-[70px] md:min-w-[80px] border border-gray-700/50 backdrop-blur-sm">
+                                <div id="cd-s" class="text-3xl md:text-4xl font-mono font-bold text-[#e10600] leading-none">00</div>
+                                <div class="text-[10px] text-gray-500 uppercase mt-1 font-bold tracking-wider">Secs</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ส่วนผลการแข่งขันล่าสุด (เพิ่มใหม่เพื่อให้เห็นข้อมูลล่าสุดจริง) -->
+            <section id="last-race">
+                <h2 class="text-2xl font-bold mb-4 flex items-center gap-2 uppercase tracking-wider text-white">
+                    <span class="bg-[#e10600] w-1 h-6 block rounded-sm"></span> <span data-i18n="latestGP">Latest Grand Prix</span>
+                </h2>
+                <div id="last-race-container">
+                    <div class="glass-card rounded-2xl p-8 text-center"><div class="loader"></div></div>
+                </div>
+            </section>
+
+            <!-- ส่วนคลิปไฮไลท์ (เพิ่มใหม่) -->
+            <section id="highlights">
+                <h2 class="text-2xl font-bold mb-4 flex items-center gap-2 uppercase tracking-wider text-white">
+                    <span class="bg-[#e10600] w-1 h-6 block rounded-sm"></span> <span data-i18n="latestHighlights">Latest Highlights</span>
+                </h2>
+                
+                <!-- ปุ่ม Filter หมวดหมู่ -->
+                <div class="flex flex-wrap gap-2 mb-4">
+                    <button onclick="filterHighlights('all')" data-category="all" class="filter-btn active px-3 py-1 text-xs font-bold uppercase rounded-full border border-gray-600 bg-[#e10600] text-white transition hover:bg-[#ff1801]" data-i18n="all">All</button>
+                    <button onclick="filterHighlights('Highlights')" data-category="Highlights" class="filter-btn px-3 py-1 text-xs font-bold uppercase rounded-full border border-gray-600 bg-gray-800 text-gray-300 transition hover:border-[#e10600] hover:text-white" data-i18n="raceQuali">Race/Quali</button>
+                    <button onclick="filterHighlights('Practice')" data-category="Practice" class="filter-btn px-3 py-1 text-xs font-bold uppercase rounded-full border border-gray-600 bg-gray-800 text-gray-300 transition hover:border-[#e10600] hover:text-white" data-i18n="practice">Practice</button>
+                    <button onclick="filterHighlights('Interview')" data-category="Interview" class="filter-btn px-3 py-1 text-xs font-bold uppercase rounded-full border border-gray-600 bg-gray-800 text-gray-300 transition hover:border-[#e10600] hover:text-white" data-i18n="interview">Interview</button>
+                </div>
+
+                <div id="highlights-container" class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div class="col-span-full text-center py-10 text-gray-500 glass-card rounded-xl">
+                        <div class="loader mb-2"></div> Loading Highlights...
+                    </div>
+                </div>
+            </section>
+
+            <!-- ส่วนตารางการแข่งขัน -->
+            <section id="schedule">
+                <div class="flex justify-between items-end mb-4">
+                    <h2 class="text-2xl font-bold flex items-center gap-2 uppercase tracking-wider text-white">
+                        <span class="bg-[#e10600] w-1 h-6 block rounded-sm"></span> <span data-i18n="upcomingSchedule">Upcoming Schedule</span>
+                    </h2>
+                    <span class="text-xs text-gray-400 bg-gray-800 px-2 py-1 rounded border border-gray-700">Powered by OpenF1</span>
+                </div>
+                
+                <div id="race-container" class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div class="col-span-full text-center py-10 text-gray-500 glass-card rounded-xl">
+                        <div class="loader mb-2"></div> กำลังโหลดข้อมูลจาก OpenF1...
+                    </div>
+                </div>
+            </section>
+        </div>
+
+        <!-- คอลัมน์ขวา: ตารางคะแนน (Sidebar) -->
+        <aside id="standings" class="lg:col-span-4">
+            <div class="glass-card rounded-2xl p-6 sticky top-24 shadow-2xl">
+                <h2 class="text-xl font-bold mb-6 flex items-center gap-2 uppercase tracking-wider border-b border-gray-700 pb-4">
+                    <i class="fa-solid fa-trophy text-[#e10600]"></i> <span data-i18n="driverStandings">Driver Standings</span>
+                </h2>
+                <div class="overflow-hidden max-h-[60vh] overflow-y-auto pr-1">
+                    <table class="w-full text-sm text-left">
+                        <thead class="text-xs text-gray-400 uppercase border-b border-gray-700">
+                            <tr>
+                                <th class="px-2 py-3 font-bold">Pos</th>
+                                <th class="px-2 py-3 font-bold">Driver</th>
+                                <th class="px-2 py-3 text-right font-bold">Pts</th>
+                            </tr>
+                        </thead>
+                        <tbody id="standings-container" class="divide-y divide-gray-800">
+                            <tr><td colspan="3" class="p-4 text-center text-gray-500"><div class="loader"></div></td></tr>
+                        </tbody>
+                    </table>
+                </div>
+                
+                <!-- ส่วนข่าวสารย้ายมาไว้ข้างล่าง Sidebar -->
+                <div class="mt-8 pt-6 border-t border-gray-700">
+                    <h3 class="text-sm font-bold text-gray-400 uppercase mb-3" data-i18n="latestUpdates">Latest Updates</h3>
+                    <div id="news-container" class="space-y-3">
+                        <!-- News items -->
+                    </div>
+                </div>
+            </div>
+        </aside>
+
+    </div>
+
+    <!-- Footer -->
+    <footer class="bg-black py-8 mt-8 text-center text-gray-600 text-xs border-t border-gray-900">
+        <p class="mb-2"><span data-i18n="dataProvided">Data provided by</span> <a href="https://openf1.org/" target="_blank" class="text-gray-400 hover:text-[#e10600]">OpenF1 API</a> & <a href="http://ergast.com/mrd/" target="_blank" class="text-gray-400 hover:text-[#e10600]">Ergast API</a></p>
+        <p>&copy; 2024 F1 Insider TH. <span data-i18n="fanSite">Unofficial Fan Site.</span></p>
+    </footer>
+
+    <!-- Modal สำหรับแสดงประวัตินักแข่ง -->
+    <div id="driver-modal" class="fixed inset-0 bg-black/90 hidden items-center justify-center z-50 p-4 backdrop-blur-md transition-opacity duration-300">
+        <div class="bg-[#1e1e24] rounded-2xl max-w-3xl w-full p-0 relative border border-gray-700 shadow-2xl transform transition-all scale-100 overflow-hidden">
+            <button onclick="closeModal()" class="absolute top-4 right-4 text-gray-400 hover:text-white transition">
+                <i class="fa-solid fa-xmark text-xl"></i>
+            </button>
+            <div id="modal-content" class="text-center p-8">
+                <!-- ข้อมูลจะถูกใส่ที่นี่ด้วย JS -->
+            </div>
+        </div>
+    </div>
+
+    <!-- Video Modal (เพิ่มใหม่) -->
+    <div id="video-modal" class="fixed inset-0 bg-black/95 hidden items-center justify-center z-[60] p-4 backdrop-blur-md">
+        <div class="relative w-full max-w-5xl aspect-video bg-black rounded-2xl overflow-hidden shadow-2xl border border-gray-800">
+            <button onclick="closeVideoModal()" class="absolute top-4 right-4 text-white/70 hover:text-white z-10 bg-black/50 rounded-full w-10 h-10 flex items-center justify-center transition hover:bg-red-600">
+                <i class="fa-solid fa-xmark text-xl"></i>
+            </button>
+            <div id="video-player-container" class="w-full h-full"></div>
+        </div>
+    </div>
+
+    <!-- Live Dashboard Overlay (Full Screen) -->
+    <div id="live-dashboard" class="dashboard-overlay">
+        <!-- Dashboard Header -->
+        <div class="bg-[#15151e] border-b border-gray-800 p-4 flex justify-between items-center shadow-lg z-20">
+            <div class="flex items-center gap-4">
+                <button onclick="toggleDashboard(false)" class="text-gray-400 hover:text-white transition">
+                    <i class="fa-solid fa-arrow-left text-xl"></i>
+                </button>
+                <div>
+                    <h2 id="dash-session-name" class="text-xl font-black italic text-white uppercase leading-none">LOADING...</h2>
+                    <div class="flex items-center gap-3 text-xs text-gray-400 mt-1">
+                        <span id="dash-track"><i class="fa-solid fa-location-dot"></i> -</span>
+                        <span class="text-gray-600">|</span>
+                        <span id="dash-status" class="text-green-500 font-bold uppercase tracking-wider">LIVE</span>
+                    </div>
+                </div>
+            </div>
+            <div class="flex items-center gap-4">
+                <div class="text-right hidden md:block">
+                    <div class="text-[10px] text-gray-500 uppercase tracking-wider" data-i18n="airTemp">Air Temp</div>
+                    <div class="font-mono font-bold text-[#e10600]">28°C</div>
+                </div>
+                <button onclick="fetchLiveTiming()" class="w-8 h-8 rounded-full bg-gray-800 flex items-center justify-center text-gray-400 hover:text-white hover:bg-gray-700 transition">
+                    <i class="fa-solid fa-rotate"></i>
+                </button>
+            </div>
+        </div>
+
+        <!-- Dashboard Content -->
+        <div class="flex-grow overflow-auto bg-[#0b0b0f] p-0 md:p-4">
+            <div class="container mx-auto max-w-6xl">
+                <div class="overflow-x-auto rounded-lg border border-gray-800 bg-[#15151e]">
+                    <table class="timing-table">
+                        <thead>
+                            <tr>
+                                <th class="w-12 text-center" data-i18n="pos">Pos</th>
+                                <th class="w-12">No.</th>
+                                <th data-i18n="driver">Driver</th>
+                                <th class="text-right" data-i18n="gap">Gap</th>
+                                <th class="text-right" data-i18n="interval">Interval</th>
+                                <th class="text-center">S1</th>
+                                <th class="text-center">S2</th>
+                                <th class="text-center">S3</th>
+                                <th class="text-right pr-4" data-i18n="lapTime">Lap Time</th>
+                            </tr>
+                        </thead>
+                        <tbody id="timing-body">
+                            <!-- Rows will be injected here -->
+                        </tbody>
+                    </table>
+                </div>
+                <div class="text-center text-xs text-gray-600 mt-4 pb-4">
+                    Data provided by OpenF1 API (Delayed/Simulated for Demo)
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- JavaScript ทำงานที่นี่ -->
+    <script src="f1.js"></script>
+</body>
+</html>
