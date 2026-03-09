@@ -186,7 +186,7 @@
                     <div class="text-[10px] text-gray-500 uppercase tracking-wider" data-i18n="airTemp">Air Temp</div>
                     <div class="font-mono font-bold text-[#e10600]">28°C</div>
                 </div>
-                <button onclick="fetchLiveTiming()" class="w-8 h-8 rounded-full bg-gray-800 flex items-center justify-center text-gray-400 hover:text-white hover:bg-gray-700 transition">
+                <button onclick="initDashboard()" class="w-8 h-8 rounded-full bg-gray-800 flex items-center justify-center text-gray-400 hover:text-white hover:bg-gray-700 transition" title="Refresh Data">
                     <i class="fa-solid fa-rotate"></i>
                 </button>
             </div>
@@ -278,13 +278,10 @@
     </div>
 
     <!-- JavaScript ทำงานที่นี่ -->
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <!-- JavaScript ทำงานที่นี่ -->
     <script src="config.js"></script>
+    <script src="api.js"></script>
+    <script src="home.js"></script>
+    <script src="dashboard.js"></script>
     <script src="f1.js"></script>
 </body>
 </html>
