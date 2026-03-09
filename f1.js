@@ -1,41 +1,6 @@
 // 0. ระบบนับถอยหลัง (Countdown)
 let countdownInterval;
 
-// --- Audio Player Logic ---
-let currentAudio = null;
-function playRadio(button, url) {
-    const icon = button.querySelector('i');
-
-    // Stop current if playing
-    if (currentAudio) {
-        currentAudio.pause();
-        const allIcons = document.querySelectorAll('.fa-circle-pause');
-        allIcons.forEach(i => {
-            i.classList.remove('fa-circle-pause');
-            i.classList.add('fa-circle-play');
-        });
-    }
-
-    // If clicking same button to stop
-    if (currentAudio && currentAudio.src === url) {
-        currentAudio = null;
-        return;
-    }
-
-    // Play new
-    currentAudio = new Audio(url);
-    currentAudio.play();
-    icon.classList.remove('fa-circle-play');
-    icon.classList.add('fa-circle-pause');
-
-    currentAudio.onended = () => {
-        icon.classList.remove('fa-circle-pause');
-        icon.classList.add('fa-circle-play');
-        currentAudio = null;
-    };
-}
-// --------------------------
-
 // OpenF1 Auth Configuration (Loaded from config.js)
 // Helper: Parse JWT to check expiry
 function parseJwt(token) {
@@ -746,11 +711,31 @@ let dashboardData = {
     intervals: {}
 };
 
-// --- Telemetry Logic ---
-let telemetryChart = null;
 let selectedDriver = null; // เก็บ Driver Number ที่เลือก
 let selectedDriver2 = null; // เก็บ Driver Number คนที่ 2
-let telemetryDataBuffer = {}; // เก็บข้อมูลกราฟแยกตาม Driver Number { 1: [], 44: [] }
+
+// --- Replay Logic ---
+let replayState = {
+    active: false,
+    playing: false,
+    speed: 10,
+    startTime: 0,
+    endTime: 0,
+    currentTime: 0,
+    timer: null
+};
+let replayBuffer = {
+    intervals: [],
+    laps: [],
+    race_control: [],
+    positions: [],
+    car_data: {}, // { driver_number: [data] }
+    location: {}  // { driver_number: [data] }
+};
+
+// --- Track Map Logic ---
+let trackPath = [];
+let mapBounds = { minX: 0, maxX: 0, minY: 0, maxY: 0, width: 0, height: 0 };
 
 async function toggleDashboard(show) {
     const dashboard = document.getElementById('live-dashboard');
@@ -772,17 +757,24 @@ async function toggleDashboard(show) {
             clearInterval(dashboardInterval);
             dashboardInterval = null;
         }
+        stopReplay();
     }
 }
 
 async function initDashboard() {
     // Reset Data
-    dashboardData = { session: null, drivers: [], laps: {}, positions: {}, intervals: {} };
+    dashboardData = { session: null, drivers: [], laps: {}, positions: {}, intervals: {}, locations: {}, grid: {}, car_data: {} };
     const tbody = document.getElementById('timing-body');
     const headerName = document.getElementById('dash-session-name');
     const headerTrack = document.getElementById('dash-track');
     const statusEl = document.getElementById('dash-status');
-    const radioContainer = document.getElementById('dash-radio-container');
+    const flagBar = document.getElementById('flag-status-bar');
+    const replayControls = document.getElementById('replay-controls');
+    
+    // Reset UI
+    if(flagBar) flagBar.classList.add('hidden');
+    replayControls.classList.add('hidden');
+    statusEl.innerHTML = 'LOADING...';
 
     tbody.innerHTML = '<tr><td colspan="9" class="text-center py-8 text-gray-500"><div class="loader mx-auto mb-2"></div>Loading Session Data...</td></tr>';
 
@@ -806,9 +798,6 @@ async function initDashboard() {
 
         dashboardData.session = latestSession;
         
-        // Reset Telemetry
-        initTelemetryChart();
-
         // Update Header
         headerName.innerText = `${latestSession.location} GP - ${latestSession.session_name}`;
         headerTrack.innerHTML = `<i class="fa-solid fa-location-dot"></i> ${latestSession.circuit_short_name}`;
@@ -836,6 +825,17 @@ async function initDashboard() {
             dashboardData.drivers = [];
         }
 
+        // Try to fetch Grid Positions (from session_result)
+        try {
+            const resRes = await fetchOpenF1(`/session_result?session_key=${latestSession.session_key}`);
+            if (resRes.ok) {
+                const results = await resRes.json();
+                results.forEach(r => {
+                    if (r.grid_position) dashboardData.grid[r.driver_number] = r.grid_position;
+                });
+            }
+        } catch (e) { console.log("Grid data not available yet"); }
+
         if (isLive) {
             statusEl.innerHTML = '<span class="text-green-500 font-bold uppercase tracking-wider animate-pulse">LIVE (STREAMING)</span>';
             
@@ -843,15 +843,17 @@ async function initDashboard() {
             await fetchSnapshot(latestSession.session_key);
             renderDashboardTable();
 
-            // Fetch Initial Radio
-            await fetchDashboardRadio(latestSession.session_key);
-            
             // Connect MQTT for Real-time updates
             connectMqtt(latestSession.session_key);
             
             // Default select leader (if available later) or first driver
             if (dashboardData.drivers.length > 0) {
                 selectDriver(dashboardData.drivers[0].driver_number);
+            }
+            
+            // Fetch Track Path (using first driver)
+            if (dashboardData.drivers.length > 0) {
+                fetchTrackPath(latestSession.session_key, dashboardData.drivers[0].driver_number);
             }
 
             // FIX: Polling backup (every 10s) to ensure data updates if MQTT fails
@@ -862,18 +864,16 @@ async function initDashboard() {
             }, 10000);
         } else {
             statusEl.innerHTML = '<span class="text-red-500 font-bold uppercase tracking-wider">REPLAY (OFFLINE)</span>';
+            replayControls.classList.remove('hidden');
             
-            // Replay Mode: Fetch Windowed Data (Final Classification)
-            // FIX: Widen window to 30 mins before end to ensure we capture final positions
-            const windowStart = new Date(endTime.getTime() - 30 * 60 * 1000).toISOString();
-            const windowEnd = new Date(endTime.getTime() + 10 * 60 * 1000).toISOString();
-            const dateFilter = `&date>=${windowStart}&date<=${windowEnd}`;
+            // Initialize Replay System
+            tbody.innerHTML = '<tr><td colspan="9" class="text-center py-8 text-gray-500"><div class="loader mx-auto mb-2"></div>Loading Replay Data...<br><span class="text-xs">This may take a moment</span></td></tr>';
+            await initReplay(latestSession);
             
-            await fetchSnapshot(latestSession.session_key, dateFilter);
-            renderDashboardTable();
-
-            // Fetch Radio for Replay
-            await fetchDashboardRadio(latestSession.session_key);
+            // Fetch Track Path
+            if (dashboardData.drivers.length > 0) {
+                fetchTrackPath(latestSession.session_key, dashboardData.drivers[0].driver_number);
+            }
         }
 
     } catch (error) {
@@ -926,173 +926,302 @@ async function fetchSnapshot(sessionKey, filter = '') {
     }
 }
 
-async function fetchDashboardRadio(sessionKey) {
-    const container = document.getElementById('dash-radio-container');
-    if (!container) return;
-    
+async function fetchReplayDriverData(driverNumber) {
+    const sessionKey = dashboardData.session.session_key;
+    if (!sessionKey || !driverNumber) return;
+
+    // Indicate loading on graph header
+    const nameEl = document.getElementById('telemetry-driver-name');
+    const originalHtml = nameEl.innerHTML;
+    nameEl.innerHTML = `<span class="animate-pulse">Loading Telemetry for ${driverNumber}...</span>`;
+
     try {
-        // Fetch last 20 radio messages
-        const res = await fetchOpenF1(`/team_radio?session_key=${sessionKey}`);
-        const data = res.ok ? await res.json() : [];
-        
-        container.innerHTML = '';
-        if (data.length === 0) {
-            container.innerHTML = '<div class="text-center text-xs text-gray-500 py-4">No radio data available.</div>';
-            return;
-        }
+        // Fetch both car_data and location data for the specific driver
+        const [carDataRes, locationRes] = await Promise.all([
+            fetchOpenF1(`/car_data?session_key=${sessionKey}&driver_number=${driverNumber}`),
+            fetchOpenF1(`/location?session_key=${sessionKey}&driver_number=${driverNumber}`)
+        ]);
 
-        // Sort by date desc (newest first)
-        const sorted = data.sort((a, b) => new Date(b.date) - new Date(a.date)).slice(0, 20);
-        
-        sorted.forEach(radio => addRadioToDashboard(radio, false));
-
-    } catch (e) {
-        console.error("Radio Fetch Error", e);
-    }
-}
-
-function addRadioToDashboard(radio, animate = true) {
-    const container = document.getElementById('dash-radio-container');
-    if (!container) return;
-
-    // Find driver info
-    const driver = dashboardData.drivers.find(d => d.driver_number == radio.driver_number);
-    const tla = driver ? driver.name_acronym : 'UNK';
-    const color = driver ? `#${driver.team_colour}` : '#666';
-    const time = new Date(radio.date).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit', second:'2-digit'});
-
-    const div = document.createElement('div');
-    div.className = `bg-[#1f1f2e] p-2 rounded border-l-4 flex justify-between items-center ${animate ? 'animate-pulse' : ''}`;
-    div.style.borderColor = color;
-    div.innerHTML = `
-        <div class="flex flex-col">
-            <div class="flex items-center gap-2">
-                <span class="font-bold text-xs text-white bg-black/30 px-1 rounded">${tla}</span>
-                <span class="text-[10px] text-gray-500 font-mono">${time}</span>
-            </div>
-        </div>
-        <button class="text-gray-400 hover:text-[#e10600] transition px-2" onclick="playRadio(this, '${radio.recording_url}')">
-            <i class="fa-solid fa-circle-play text-xl"></i>
-        </button>
-    `;
-
-    // Prepend to top
-    container.insertBefore(div, container.firstChild);
-    
-    // Remove animation after a while
-    if (animate) {
-        setTimeout(() => div.classList.remove('animate-pulse'), 2000);
-    }
-}
-
-function initTelemetryChart() {
-    const ctx = document.getElementById('telemetryChart').getContext('2d');
-    
-    if (telemetryChart) {
-        telemetryChart.destroy();
-    }
-
-    telemetryChart = new Chart(ctx, {
-        type: 'line',
-        data: {
-            labels: [],
-            datasets: [{
-                label: 'Driver 1',
-                data: [],
-                borderColor: '#e10600',
-                backgroundColor: 'rgba(225, 6, 0, 0.05)',
-                borderWidth: 2,
-                pointRadius: 0,
-                tension: 0.4,
-                fill: false
-            },
-            {
-                label: 'Driver 2',
-                data: [],
-                borderColor: '#3b82f6', // สีฟ้า
-                backgroundColor: 'rgba(59, 130, 246, 0.05)',
-                borderWidth: 2,
-                pointRadius: 0,
-                tension: 0.4,
-                fill: false
-            }]
-        },
-        options: {
-            responsive: true,
-            maintainAspectRatio: false,
-            animation: false, // ปิด Animation เพื่อประสิทธิภาพ Real-time
-            interaction: {
-                mode: 'index',
-                intersect: false,
-            },
-            plugins: {
-                legend: { display: false },
-                tooltip: { enabled: true }
-            },
-            scales: {
-                x: {
-                    display: false, // ซ่อนแกน X (เวลา) เพื่อความสะอาด
-                    grid: { display: false }
-                },
-                y: {
-                    grid: { color: '#333' },
-                    ticks: { color: '#888' },
-                    beginAtZero: false
-                }
+        if (carDataRes.ok) {
+            const data = await carDataRes.json();
+            if (Array.isArray(data)) {
+                data.sort((a, b) => new Date(a.date) - new Date(b.date));
+                replayBuffer.car_data[driverNumber] = data;
             }
         }
-    });
-    telemetryDataBuffer = {};
+        if (locationRes.ok) {
+            const data = await locationRes.json();
+            if (Array.isArray(data)) {
+                data.sort((a, b) => new Date(a.date) - new Date(b.date));
+                replayBuffer.location[driverNumber] = data;
+            }
+        }
+
+    } catch (e) {
+        console.error(`Failed to fetch replay data for driver ${driverNumber}`, e);
+        // Optionally show an error to the user
+    } finally {
+        // Restore header text
+        // A small delay might be needed if the update is too fast
+        setTimeout(() => {
+            if (nameEl.innerHTML.includes('Loading')) updateTelemetryHeader();
+        }, 500);
+    }
 }
 
-function selectDriver(driverNumber) {
-    // Logic การเลือก 2 คน
-    if (selectedDriver == driverNumber) {
-        // ถ้าคลิกคนเดิม (คนแรก) -> ยกเลิกคนแรก (เลื่อนคนที่ 2 มาแทนถ้ามี)
-        selectedDriver = selectedDriver2;
-        selectedDriver2 = null;
-    } else if (selectedDriver2 == driverNumber) {
-        // ถ้าคลิกคนเดิม (คนที่ 2) -> ยกเลิกคนที่ 2
-        selectedDriver2 = null;
-    } else {
-        // เลือกคนใหม่
-        if (!selectedDriver) {
-            selectedDriver = driverNumber;
-        } else if (!selectedDriver2) {
-            selectedDriver2 = driverNumber;
-        } else {
-            // ถ้าเลือกครบ 2 คนแล้ว ให้แทนที่คนที่ 2
-            selectedDriver2 = driverNumber;
+// --- REPLAY SYSTEM FUNCTIONS ---
+
+async function initReplay(session) {
+    replayState.active = true;
+    replayState.startTime = new Date(session.date_start).getTime();
+    replayState.endTime = new Date(session.date_end).getTime();
+    replayState.currentTime = replayState.startTime;
+    
+    // Fetch Full History
+    try {
+        const [intRes, lapsRes, posRes, rcRes] = await Promise.all([
+            fetchOpenF1(`/intervals?session_key=${session.session_key}`),
+            fetchOpenF1(`/laps?session_key=${session.session_key}`),
+            fetchOpenF1(`/position?session_key=${session.session_key}`),
+            fetchOpenF1(`/race_control?session_key=${session.session_key}`)
+        ]);
+
+        replayBuffer.intervals = intRes.ok ? await intRes.json() : [];
+        replayBuffer.laps = lapsRes.ok ? await lapsRes.json() : [];
+        replayBuffer.positions = posRes.ok ? await posRes.json() : [];
+        replayBuffer.race_control = rcRes.ok ? await rcRes.json() : [];
+
+        // Sort data by date
+        const sortByDate = (a, b) => new Date(a.date) - new Date(b.date);
+        replayBuffer.intervals.sort(sortByDate);
+        replayBuffer.laps.sort(sortByDate);
+        replayBuffer.positions.sort(sortByDate);
+        replayBuffer.race_control.sort(sortByDate);
+
+        // Fetch Location for ALL drivers (for Live Tracker)
+        // This might take a moment, so we do it in background or await
+        const driverNumbers = dashboardData.drivers.map(d => d.driver_number);
+        await Promise.all(driverNumbers.map(async (num) => {
+            const res = await fetchOpenF1(`/location?session_key=${session.session_key}&driver_number=${num}`);
+            if (res.ok) {
+                const data = await res.json();
+                data.sort((a, b) => new Date(a.date) - new Date(b.date));
+                replayBuffer.location[num] = data;
+            }
+        }));
+        // Fetch Car Data for ALL drivers (for Table)
+        await Promise.all(driverNumbers.map(async (num) => {
+            const res = await fetchOpenF1(`/car_data?session_key=${session.session_key}&driver_number=${num}`);
+            if (res.ok) {
+                const data = await res.json();
+                data.sort((a, b) => new Date(a.date) - new Date(b.date));
+                replayBuffer.car_data[num] = data;
+            }
+        }));
+
+        // Setup UI
+        document.getElementById('replay-total-time').innerText = formatReplayTime(replayState.endTime - replayState.startTime);
+        document.getElementById('replay-slider').value = 0;
+        
+        // Initial Render
+        updateReplayFrame();
+        
+        // Auto play
+        playReplay();
+
+    } catch (e) {
+        console.error("Replay Init Error", e);
+        document.getElementById('timing-body').innerHTML = '<tr><td colspan="9" class="text-center py-4 text-red-500">Failed to load replay data.</td></tr>';
+    }
+}
+
+function toggleReplay() {
+    if (replayState.playing) pauseReplay();
+    else playReplay();
+}
+
+function playReplay() {
+    if (!replayState.active) return;
+    replayState.playing = true;
+    
+    const btn = document.getElementById('replay-play-btn');
+    if(btn) btn.innerHTML = '<i class="fa-solid fa-pause pl-0"></i>';
+
+    if (replayState.timer) clearInterval(replayState.timer);
+    
+    const updateInterval = 100; // Update UI every 100ms
+    replayState.timer = setInterval(() => {
+        // Advance time: speed * real_time_passed
+        replayState.currentTime += replayState.speed * updateInterval;
+        
+        if (replayState.currentTime >= replayState.endTime) {
+            replayState.currentTime = replayState.endTime;
+            pauseReplay();
         }
+        
+        updateReplayFrame();
+        
+        // Update Slider
+        const progress = (replayState.currentTime - replayState.startTime) / (replayState.endTime - replayState.startTime) * 100;
+        document.getElementById('replay-slider').value = progress;
+        
+    }, updateInterval);
+}
+
+function pauseReplay() {
+    replayState.playing = false;
+    if (replayState.timer) clearInterval(replayState.timer);
+    const btn = document.getElementById('replay-play-btn');
+    if(btn) btn.innerHTML = '<i class="fa-solid fa-play pl-1"></i>';
+}
+
+function stopReplay() {
+    pauseReplay();
+    replayState.active = false;
+    replayBuffer = { intervals: [], laps: [], positions: [], race_control: [], car_data: {}, location: {} };
+}
+
+function setReplaySpeed(speed) {
+    replayState.speed = parseInt(speed);
+}
+
+function seekReplay(percent) {
+    if (!replayState.active) return;
+    const duration = replayState.endTime - replayState.startTime;
+    replayState.currentTime = replayState.startTime + (duration * (percent / 100));
+    updateReplayFrame();
+}
+
+function updateReplayFrame() {
+    // Update Time Display
+    const elapsed = replayState.currentTime - replayState.startTime;
+    document.getElementById('replay-current-time').innerText = formatReplayTime(elapsed);
+
+    // --- Update Data State for current time ---
+
+    // 1. Intervals
+    dashboardData.intervals = {};
+    for (const item of replayBuffer.intervals) {
+        if (new Date(item.date).getTime() > replayState.currentTime) break;
+        dashboardData.intervals[item.driver_number] = item;
     }
 
-    // เคลียร์ Buffer ของคนที่เลือกใหม่ (เพื่อให้กราฟเริ่มวาดใหม่)
-    if (selectedDriver && !telemetryDataBuffer[selectedDriver]) telemetryDataBuffer[selectedDriver] = [];
-    if (selectedDriver2 && !telemetryDataBuffer[selectedDriver2]) telemetryDataBuffer[selectedDriver2] = [];
-    
-    // อัปเดตชื่อบนหัวกราฟ
-    updateTelemetryHeader();
-    
-    // รีเฟรชตารางเพื่อแสดง Highlight
+    // 2. Positions (Source of Truth for Ordering)
+    dashboardData.positions = {};
+    for (const item of replayBuffer.positions) {
+        if (new Date(item.date).getTime() > replayState.currentTime) break;
+        dashboardData.positions[item.driver_number] = item;
+    }
+
+    // 3. Update Laps
+    for (const item of replayBuffer.laps) {
+        if (new Date(item.date_start).getTime() > replayState.currentTime) break;
+        dashboardData.laps[item.driver_number] = item;
+    }
+
+    // 4. Update Car Data (for Table)
+    dashboardData.car_data = {};
+    if (replayBuffer.car_data) {
+        Object.keys(replayBuffer.car_data).forEach(driverNum => {
+            const carData = replayBuffer.car_data[driverNum];
+            if (carData && carData.length > 0) {
+                for (let i = carData.length - 1; i >= 0; i--) {
+                    if (new Date(carData[i].date).getTime() <= replayState.currentTime) {
+                        dashboardData.car_data[driverNum] = carData[i];
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
+    // 5. Update Race Control (for Flags)
+    for (const item of replayBuffer.race_control) {
+        if (new Date(item.date).getTime() > replayState.currentTime) break;
+        updateFlagStatus(item);
+    }
+
+    // 6. Update Locations (for Track Map)
+    dashboardData.locations = {};
+    if (replayBuffer.location) {
+        Object.keys(replayBuffer.location).forEach(driverNum => {
+            const locData = replayBuffer.location[driverNum];
+            if (locData && locData.length > 0 && dashboardData.drivers.find(d => d.driver_number == driverNum)) {
+                // Find last known location. This is slow but will work for now.
+                for (let i = locData.length - 1; i >= 0; i--) {
+                    if (new Date(locData[i].date).getTime() <= replayState.currentTime) {
+                        dashboardData.locations[driverNum] = { x: locData[i].x, y: locData[i].y };
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
+    // --- Trigger UI Renders ---
     renderDashboardTable();
+    drawTrackMap();
 }
 
-function updateTelemetryHeader() {
-    const nameEl = document.getElementById('telemetry-driver-name');
-    if (!nameEl) return;
+function formatReplayTime(ms) {
+    if (ms < 0) ms = 0;
+    const totalSec = Math.floor(ms / 1000);
+    const h = Math.floor(totalSec / 3600);
+    const m = Math.floor((totalSec % 3600) / 60);
+    const s = totalSec % 60;
+    return `${h.toString().padStart(2,'0')}:${m.toString().padStart(2,'0')}:${s.toString().padStart(2,'0')}`;
+}
 
-    const d1 = dashboardData.drivers.find(d => d.driver_number == selectedDriver);
-    const d2 = dashboardData.drivers.find(d => d.driver_number == selectedDriver2);
+let lastFlagClearTimer = null;
+function updateFlagStatus(message) {
+    const bar = document.getElementById('flag-status-bar');
+    if (!bar || !message) return;
 
-    if (d1 && d2) {
-        nameEl.innerHTML = `<span style="color:#ffcccc">${d1.name_acronym}</span> <span class="text-white text-[10px]">VS</span> <span style="color:#cceeff">${d2.name_acronym}</span>`;
-        nameEl.style.background = `linear-gradient(90deg, #e10600 50%, #3b82f6 50%)`;
-    } else if (d1) {
-        nameEl.innerText = `${d1.name_acronym} - ${d1.last_name.toUpperCase()}`;
-        nameEl.style.background = `#${d1.team_colour}`;
-    } else {
-        nameEl.innerText = 'SELECT DRIVER';
-        nameEl.style.background = '#333';
+    // Clear previous timer if a new flag comes in
+    if (lastFlagClearTimer) clearTimeout(lastFlagClearTimer);
+
+    const flag = message.flag ? message.flag.toUpperCase() : "CLEAR";
+    let bgColor = '';
+    let text = flag;
+
+    switch (flag) {
+        case 'YELLOW':
+            bgColor = 'bg-yellow-400 animate-pulse';
+            text = `YELLOW FLAG ${message.scope === 'Sector' ? `SECTOR ${message.sector}` : ''}`;
+            break;
+        case 'RED':
+            bgColor = 'bg-red-600 animate-pulse';
+            text = 'RED FLAG - SESSION STOPPED';
+            break;
+        case 'GREEN':
+            bgColor = 'bg-green-500';
+            text = 'GREEN FLAG - TRACK CLEAR';
+            break;
+        case 'SC':
+            bgColor = 'bg-yellow-400';
+            text = 'SAFETY CAR DEPLOYED';
+            break;
+        case 'VSC':
+            bgColor = 'bg-yellow-400';
+            text = 'VIRTUAL SAFETY CAR';
+            break;
+        case 'CLEAR':
+            // This is a special case to hide the bar
+            bar.classList.add('hidden');
+            return;
+        default:
+            // For unknown flags, just hide it
+            bar.classList.add('hidden');
+            return;
+    }
+    
+    bar.className = `text-center p-2 text-xl md:text-2xl font-black uppercase tracking-widest text-black transition-all duration-300 z-20 relative ${bgColor}`;
+    bar.innerText = text;
+    bar.classList.remove('hidden');
+
+    // If the flag is green or clear, hide it after a few seconds
+    if (flag === 'GREEN' || flag === 'CLEAR') {
+        lastFlagClearTimer = setTimeout(() => bar.classList.add('hidden'), 5000);
     }
 }
 
@@ -1114,7 +1243,8 @@ async function connectMqtt(sessionKey) {
         mqttClient.subscribe('v1/laps');
         mqttClient.subscribe('v1/position');
         mqttClient.subscribe('v1/intervals');
-        mqttClient.subscribe('v1/team_radio');
+        mqttClient.subscribe('v1/race_control');
+        mqttClient.subscribe('v1/location'); // Subscribe Location
         mqttClient.subscribe('v1/car_data'); // Subscribe Telemetry
     });
 
@@ -1135,21 +1265,14 @@ async function connectMqtt(sessionKey) {
             dashboardData.positions[driverNum] = msg;
         } else if (topic === 'v1/intervals') {
             dashboardData.intervals[driverNum] = msg;
-        } else if (topic === 'v1/team_radio') {
-            addRadioToDashboard(msg, true);
+        } else if (topic === 'v1/race_control') {
+            updateFlagStatus(msg);
+        } else if (topic === 'v1/location') {
+            if (!dashboardData.locations) dashboardData.locations = {};
+            // Store latest location
+            dashboardData.locations[driverNum] = { x: msg.x, y: msg.y };
         } else if (topic === 'v1/car_data') {
-            // Update Telemetry if it matches selected driver
-            if ((selectedDriver && driverNum == selectedDriver) || (selectedDriver2 && driverNum == selectedDriver2)) {
-                const speed = msg.speed;
-                const time = new Date(msg.date).toLocaleTimeString();
-                
-                // Push to buffer
-                if (!telemetryDataBuffer[driverNum]) telemetryDataBuffer[driverNum] = [];
-                telemetryDataBuffer[driverNum].push({ time, speed });
-                
-                // Keep only last 100 points (~30-60 seconds depending on rate)
-                if (telemetryDataBuffer[driverNum].length > 100) telemetryDataBuffer[driverNum].shift();
-            }
+            dashboardData.car_data[driverNum] = msg;
         }
 
         // Trigger Render (Throttled via requestAnimationFrame)
@@ -1166,25 +1289,7 @@ function requestRender() {
             renderPending = false;
             
             // Update Chart here as well
-            if (telemetryChart) {
-                // Dataset 1 (Red)
-                if (selectedDriver && telemetryDataBuffer[selectedDriver]) {
-                    telemetryChart.data.labels = telemetryDataBuffer[selectedDriver].map(d => d.time); // Use labels from driver 1
-                    telemetryChart.data.datasets[0].data = telemetryDataBuffer[selectedDriver].map(d => d.speed);
-                } else {
-                    telemetryChart.data.datasets[0].data = [];
-                }
-
-                // Dataset 2 (Blue)
-                if (selectedDriver2 && telemetryDataBuffer[selectedDriver2]) {
-                    // If driver 1 is empty, use driver 2 labels
-                    if (!selectedDriver) telemetryChart.data.labels = telemetryDataBuffer[selectedDriver2].map(d => d.time);
-                    telemetryChart.data.datasets[1].data = telemetryDataBuffer[selectedDriver2].map(d => d.speed);
-                } else {
-                    telemetryChart.data.datasets[1].data = [];
-                }
-                telemetryChart.update();
-            }
+            drawTrackMap();
         });
     }
 }
@@ -1192,68 +1297,158 @@ function requestRender() {
 function renderDashboardTable() {
     const tbody = document.getElementById('timing-body');
     let tableHtml = '';
-    
+
     // Sort drivers by position
     const sortedDrivers = (dashboardData.drivers || []).sort((a, b) => {
-        const posA = dashboardData.positions[a.driver_number] ? dashboardData.positions[a.driver_number].position : 99;
-        const posB = dashboardData.positions[b.driver_number] ? dashboardData.positions[b.driver_number].position : 99;
+            // Use current position if available, otherwise fallback to grid position, otherwise 99
+            const posA = dashboardData.positions[a.driver_number]?.position || dashboardData.grid[a.driver_number] || 99;
+            const posB = dashboardData.positions[b.driver_number]?.position || dashboardData.grid[b.driver_number] || 99;
             return posA - posB;
-        });
+    });
 
-        sortedDrivers.forEach((driver, index) => {
-            const lap = dashboardData.laps[driver.driver_number] || {};
-            const pos = dashboardData.positions[driver.driver_number] ? dashboardData.positions[driver.driver_number].position : '-';
-            
-            // สีทีม (ถ้ามีข้อมูล) หรือ default
-            const teamColor = '#' + (driver.team_colour || 'ffffff');
-            
-            // ดึงข้อมูล Gap จริงจาก API
-            const intervalData = dashboardData.intervals[driver.driver_number];
-            let gap = '-';
-            let interval = '-';
+    sortedDrivers.forEach((driver, index) => {
+        const lap = dashboardData.laps[driver.driver_number] || {};
+        const carData = dashboardData.car_data ? (dashboardData.car_data[driver.driver_number] || {}) : {};
+        const pos = dashboardData.positions[driver.driver_number] ? dashboardData.positions[driver.driver_number].position : '-';
+        const teamColor = '#' + (driver.team_colour || 'ffffff');
+        
+        const intervalData = dashboardData.intervals[driver.driver_number];
+        let gap = '-';
+        let interval = '-';
 
-            if (intervalData) {
-                gap = intervalData.gap_to_leader !== null ? `+${parseFloat(intervalData.gap_to_leader).toFixed(3)}` : 'Leader';
-                interval = intervalData.interval !== null ? `+${parseFloat(intervalData.interval).toFixed(3)}` : '-';
-                if (index === 0) { gap = 'Leader'; interval = '-'; }
-            } else {
-                gap = index === 0 ? 'Leader' : '-';
-            }
+        if (intervalData) {
+            gap = intervalData.gap_to_leader !== null ? `+${parseFloat(intervalData.gap_to_leader).toFixed(3)}` : 'Leader';
+            interval = intervalData.interval !== null ? `+${parseFloat(intervalData.interval).toFixed(3)}` : '-';
+            if (index === 0) { gap = 'Leader'; interval = '-'; }
+        } else {
+            gap = index === 0 ? 'Leader' : '';
+        }
 
-            // จัดการชื่อนักแข่งให้แสดงผลถูกต้องที่สุด (Logic แบบละเอียด)
-            let driverName = driver.broadcast_name;
-            if (!driverName) driverName = driver.full_name;
-            if (!driverName && driver.first_name && driver.last_name) driverName = `${driver.first_name} ${driver.last_name}`;
-            if (!driverName) driverName = driver.name_acronym;
-            if (!driverName) driverName = 'Unknown';
-            
-            // Highlight Selected Row
-            let rowClass = 'hover:bg-[#222] border-l-4 border-transparent';
-            if (selectedDriver == driver.driver_number) {
-                rowClass = 'bg-white/10 border-l-4 border-[#e10600]'; // สีแดงสำหรับคนแรก
-            } else if (selectedDriver2 == driver.driver_number) {
-                rowClass = 'bg-white/10 border-l-4 border-[#3b82f6]'; // สีฟ้าสำหรับคนที่สอง
-            }
+        let driverName = driver.broadcast_name || driver.full_name || driver.name_acronym || 'Unknown';
+        if (!driver.broadcast_name && driver.first_name && driver.last_name) driverName = `${driver.first_name} ${driver.last_name}`;
 
-            tableHtml += `
-                <tr class="timing-row cursor-pointer transition ${rowClass}" onclick="selectDriver(${driver.driver_number})">
-                    <td class="text-center font-bold">${pos}</td>
-                    <td class="font-mono font-bold" style="color:${teamColor}">${driver.driver_number}</td>
-                    <td>
-                        <div class="font-bold text-white leading-tight">${driverName}</div>
-                        <div class="text-[10px] text-gray-500 uppercase">${driver.team_name || ''}</div>
-                    </td>
-                    <td class="text-right font-mono text-xs">${gap}</td>
-                    <td class="text-right font-mono text-xs">${interval}</td>
-                    <td class="text-center font-mono text-xs"><span class="sector-dot bg-sector-green"></span>${lap.duration_sector_1 || '-'}</td>
-                    <td class="text-center font-mono text-xs"><span class="sector-dot bg-sector-yellow"></span>${lap.duration_sector_2 || '-'}</td>
-                    <td class="text-center font-mono text-xs"><span class="sector-dot bg-sector-purple"></span>${lap.duration_sector_3 || '-'}</td>
-                    <td class="text-right font-mono font-bold text-white pr-4">${(lap.lap_duration && typeof lap.lap_duration === 'number') ? lap.lap_duration.toFixed(3) : '-'}</td>
-                </tr>
-            `;
-        });
+        // Highlight Selected Row
+        let rowClass = 'hover:bg-[#222] border-l-4 border-transparent';
+        if (selectedDriver == driver.driver_number) {
+            rowClass = 'bg-white/10 border-l-4 border-[#e10600]';
+        } else if (selectedDriver2 == driver.driver_number) {
+            rowClass = 'bg-white/10 border-l-4 border-[#3b82f6]';
+        }
+
+        tableHtml += `
+            <tr class="timing-row cursor-pointer transition ${rowClass}" onclick="selectDriver(${driver.driver_number})">
+                <td class="text-center font-bold">${pos}</td>
+                <td class="font-mono font-bold" style="color:${teamColor}">${driver.driver_number}</td>
+                <td>
+                    <div class="font-bold text-white leading-tight">${driverName}</div>
+                    <div class="text-[10px] text-gray-500 uppercase">${driver.team_name || ''}</div>
+                </td>
+                <td class="text-right font-mono text-xs">${gap}</td>
+                <td class="text-right font-mono text-xs">${interval}</td>
+                <td class="text-center font-mono text-xs"><span class="sector-dot bg-sector-green"></span>${lap.duration_sector_1 || '-'}</td>
+                <td class="text-center font-mono text-xs"><span class="sector-dot bg-sector-yellow"></span>${lap.duration_sector_2 || '-'}</td>
+                <td class="text-center font-mono text-xs"><span class="sector-dot bg-sector-purple"></span>${lap.duration_sector_3 || '-'}</td>
+                <td class="text-right font-mono font-bold text-white">${(lap.lap_duration && typeof lap.lap_duration === 'number') ? lap.lap_duration.toFixed(3) : '-'}</td>
+                <td class="text-center font-mono font-bold text-white">${carData.n_gear || '-'}</td>
+                <td class="text-right font-mono font-bold text-white pr-4">${carData.speed || '-'}</td>
+            </tr>
+        `;
+    });
 
     tbody.innerHTML = tableHtml;
+}
+
+async function fetchTrackPath(sessionKey, driverNum) {
+    try {
+        // Fetch locations for track shape
+        const res = await fetchOpenF1(`/location?session_key=${sessionKey}&driver_number=${driverNum}`);
+        const data = res.ok ? await res.json() : [];
+        
+        if (data.length > 0) {
+            // Downsample
+            trackPath = data.filter((_, i) => i % 5 === 0).map(d => ({x: d.x, y: d.y}));
+            
+            // Calculate Bounds
+            let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+            trackPath.forEach(p => {
+                if (p.x < minX) minX = p.x;
+                if (p.x > maxX) maxX = p.x;
+                if (p.y < minY) minY = p.y;
+                if (p.y > maxY) maxY = p.y;
+            });
+            
+            const padding = 1000;
+            mapBounds = { 
+                minX: minX - padding, maxX: maxX + padding, 
+                minY: minY - padding, maxY: maxY + padding, 
+                width: (maxX - minX) + 2*padding, height: (maxY - minY) + 2*padding 
+            };
+        }
+    } catch (e) { console.error("Track Path Error", e); }
+}
+
+function drawTrackMap() {
+    const canvas = document.getElementById('trackMap');
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    
+    const rect = canvas.getBoundingClientRect();
+    canvas.width = rect.width;
+    canvas.height = rect.height;
+    
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    
+    if (trackPath.length === 0) {
+        ctx.fillStyle = '#666';
+        ctx.font = '12px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('Loading Track...', canvas.width/2, canvas.height/2);
+        return;
+    }
+
+    const scale = Math.min(canvas.width / mapBounds.width, canvas.height / mapBounds.height);
+    const offsetX = (canvas.width - mapBounds.width * scale) / 2;
+    const offsetY = (canvas.height - mapBounds.height * scale) / 2;
+
+    const transform = (x, y) => ({
+        x: offsetX + (x - mapBounds.minX) * scale,
+        y: canvas.height - (offsetY + (y - mapBounds.minY) * scale) // Flip Y
+    });
+
+    // Draw Track
+    ctx.beginPath();
+    ctx.strokeStyle = '#444';
+    ctx.lineWidth = 4;
+    trackPath.forEach((p, i) => {
+        const pos = transform(p.x, p.y);
+        if (i === 0) ctx.moveTo(pos.x, pos.y); else ctx.lineTo(pos.x, pos.y);
+    });
+    ctx.stroke();
+
+    // Draw Drivers
+    if (dashboardData.locations) {
+        Object.keys(dashboardData.locations).forEach(driverNum => {
+            const loc = dashboardData.locations[driverNum];
+            const pos = transform(loc.x, loc.y);
+            const driver = dashboardData.drivers.find(d => d.driver_number == driverNum);
+            const color = driver ? `#${driver.team_colour}` : '#fff';
+            
+            // Dot
+            ctx.beginPath();
+            ctx.fillStyle = color;
+            ctx.arc(pos.x, pos.y, 5, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = '#000';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+            
+            // Label
+            ctx.fillStyle = '#fff';
+            ctx.font = 'bold 9px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText(driverNum, pos.x, pos.y - 7);
+        });
+    }
 }
 
 // --- LANGUAGE TRANSLATION ---

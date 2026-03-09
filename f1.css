@@ -60,37 +60,44 @@ h1, h2, h3, .f1-font { font-family: 'Titillium Web', sans-serif; }
 
 .timing-table th {
     text-align: center;
-    padding: 8px 4px;
-    background-color: #111;
-    color: #888;
-    font-size: 10px;
-    font-weight: 700;
+    padding: 12px 8px;
+    background-color: #0f0f13;
+    color: #9ca3af;
+    font-size: 11px;
+    font-weight: 800;
     text-transform: uppercase;
     letter-spacing: 1px;
     position: sticky;
     top: 0;
     z-index: 20;
-    border-bottom: 2px solid #444;
-    border-right: 1px solid #222;
+    border-bottom: 1px solid #333;
+    border-right: 1px solid #1a1a20;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.5);
 }
 
 .timing-table td {
-    padding: 4px 8px;
-    border-bottom: 1px solid #222;
-    border-right: 1px solid #222;
+    padding: 6px 10px;
+    border-bottom: 1px solid #1a1a20;
+    border-right: 1px solid #1a1a20;
     font-size: 14px;
     color: #ddd; /* สีตัวอักษรสว่างขึ้น */
     vertical-align: middle;
-    height: 34px; /* ความสูงแถวแบบ Compact */
+    height: 42px; /* ความสูงแถวแบบ Comfortable */
 }
 
 /* Zebra Striping & Hover */
 .timing-row:nth-child(even) {
-    background-color: #0a0a0a;
+    background-color: #0f0f13;
 }
 .timing-row:hover td {
-    background-color: #222;
+    background-color: #1e1e26;
     color: #fff;
+    cursor: pointer;
+}
+
+/* Smooth Row Animation */
+.timing-row {
+    will-change: transform; /* Optimize performance */
 }
 
 /* Column Specific Styles */
