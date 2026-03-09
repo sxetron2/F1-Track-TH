@@ -51,44 +51,78 @@ h1, h2, h3, .f1-font { font-family: 'Titillium Web', sans-serif; }
 /* Timing Table Styles */
 .timing-table {
     width: 100%;
-    border-collapse: separate;
-    border-spacing: 0;
+    border-collapse: collapse; /* เปลี่ยนเป็น collapse เพื่อให้มีเส้น Grid */
     font-family: 'Titillium Web', sans-serif;
     font-variant-numeric: tabular-nums; /* ตัวเลขกว้างเท่ากัน */
+    background-color: #000000; /* พื้นหลังดำสนิท */
+    border: 1px solid #333;
 }
 
 .timing-table th {
-    text-align: left;
-    padding: 12px 8px;
-    background-color: #15151e;
-    color: #6b7280;
-    font-size: 11px;
+    text-align: center;
+    padding: 8px 4px;
+    background-color: #111;
+    color: #888;
+    font-size: 10px;
+    font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 1px;
     position: sticky;
     top: 0;
-    z-index: 10;
-    border-bottom: 2px solid #2a2a35;
+    z-index: 20;
+    border-bottom: 2px solid #444;
+    border-right: 1px solid #222;
 }
 
 .timing-table td {
-    padding: 8px;
-    border-bottom: 1px solid #1f1f2e;
+    padding: 4px 8px;
+    border-bottom: 1px solid #222;
+    border-right: 1px solid #222;
     font-size: 14px;
-    color: #e5e7eb;
+    color: #ddd; /* สีตัวอักษรสว่างขึ้น */
+    vertical-align: middle;
+    height: 34px; /* ความสูงแถวแบบ Compact */
 }
 
+/* Zebra Striping & Hover */
+.timing-row:nth-child(even) {
+    background-color: #0a0a0a;
+}
 .timing-row:hover td {
-    background-color: rgba(255, 255, 255, 0.03);
+    background-color: #222;
+    color: #fff;
+}
+
+/* Column Specific Styles */
+.timing-table td:nth-child(1) { /* Pos */
+    font-weight: bold;
+    color: #fff;
+    font-size: 12px;
+    border-right: 1px solid #333;
+}
+
+.timing-table td:nth-child(3) { /* Driver Name */
+    border-right: 2px solid #444; /* เส้นแบ่งหนาขึ้นหลังชื่อนักแข่ง */
+}
+
+/* Time Columns (Gap, Int, Sectors, Lap) */
+.timing-table td:nth-child(n+4) {
+    font-family: 'Titillium Web', monospace;
+    letter-spacing: -0.5px;
+    font-weight: 500;
 }
 
 .sector-dot {
     display: inline-block;
-    width: 8px;
-    height: 8px;
+    width: 6px;
+    height: 6px;
     border-radius: 50%;
-    margin-right: 4px;
+    margin-right: 6px;
+    vertical-align: middle;
+    position: relative;
+    top: -1px;
 }
-.bg-sector-green { background-color: #22c55e; box-shadow: 0 0 5px rgba(34, 197, 94, 0.5); }
-.bg-sector-yellow { background-color: #eab308; }
-.bg-sector-purple { background-color: #a855f7; box-shadow: 0 0 5px rgba(168, 85, 247, 0.5); }
+/* Neon Colors */
+.bg-sector-green { background-color: #00ff00; box-shadow: 0 0 6px #00ff00; }
+.bg-sector-yellow { background-color: #ffff00; opacity: 0.9; }
+.bg-sector-purple { background-color: #ff00ff; box-shadow: 0 0 6px #ff00ff; }

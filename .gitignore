@@ -1,0 +1,20 @@
+# Dependencies
+node_modules/
+
+# Configuration file with sensitive data
+config.js
+
+# Environment variables (สำคัญมาก หากคุณย้าย Key ไปไว้ในไฟล์ .env)
+.env
+.env.local
+
+# System Files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# IDEs
+.vscode/
+.idea/

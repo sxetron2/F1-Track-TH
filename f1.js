@@ -1,23 +1,148 @@
 // 0. ระบบนับถอยหลัง (Countdown)
 let countdownInterval;
 
+// --- Audio Player Logic ---
+let currentAudio = null;
+function playRadio(button, url) {
+    const icon = button.querySelector('i');
+
+    // Stop current if playing
+    if (currentAudio) {
+        currentAudio.pause();
+        const allIcons = document.querySelectorAll('.fa-circle-pause');
+        allIcons.forEach(i => {
+            i.classList.remove('fa-circle-pause');
+            i.classList.add('fa-circle-play');
+        });
+    }
+
+    // If clicking same button to stop
+    if (currentAudio && currentAudio.src === url) {
+        currentAudio = null;
+        return;
+    }
+
+    // Play new
+    currentAudio = new Audio(url);
+    currentAudio.play();
+    icon.classList.remove('fa-circle-play');
+    icon.classList.add('fa-circle-pause');
+
+    currentAudio.onended = () => {
+        icon.classList.remove('fa-circle-pause');
+        icon.classList.add('fa-circle-play');
+        currentAudio = null;
+    };
+}
+// --------------------------
+
+// OpenF1 Auth Configuration (Loaded from config.js)
+// Helper: Parse JWT to check expiry
+function parseJwt(token) {
+    try {
+        const base64Url = token.split('.')[1];
+        const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
+        const jsonPayload = decodeURIComponent(window.atob(base64).split('').map(c => '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2)).join(''));
+        return JSON.parse(jsonPayload);
+    } catch (e) { return null; }
+}
+
+let openF1Token = CONFIG.ACCESS_TOKEN || null;
+let tokenExpiry = 0;
+if (openF1Token) {
+    const decoded = parseJwt(openF1Token);
+    tokenExpiry = decoded ? decoded.exp : 0;
+}
+
+async function getOpenF1Token(forceRefresh = false) {
+    // Safety Check: ถ้าไม่มี CONFIG หรือไม่ได้ตั้งค่า User/Pass ให้ข้ามไป (ใช้แบบ Public/Free)
+    if (typeof CONFIG === 'undefined' || !CONFIG.OPENF1_USER) return null;
+
+    const now = Date.now() / 1000;
+    
+    // ถ้ามี Token และยังไม่หมดอายุ (และไม่ได้บังคับ refresh) ให้ใช้ของเดิม
+    if (!forceRefresh && openF1Token && now < (tokenExpiry - 60)) {
+        return openF1Token;
+    }
+
+    try {
+        const params = new URLSearchParams();
+        params.append("username", CONFIG.OPENF1_USER);
+        params.append("password", CONFIG.OPENF1_PASS);
+
+        const response = await fetch("https://api.openf1.org/token", {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: params,
+        });
+
+        if (response.ok) {
+            const data = await response.json();
+            openF1Token = data.access_token;
+            const decoded = parseJwt(openF1Token);
+            tokenExpiry = decoded ? decoded.exp : (now + 3600);
+            return openF1Token;
+        } else {
+            console.error("OpenF1 Auth Failed:", await response.text());
+            return null;
+        }
+    } catch (e) {
+        console.error("OpenF1 Auth Error:", e);
+        return null;
+    }
+}
+
+async function fetchOpenF1(endpoint, retry = true) {
+    let token = await getOpenF1Token();
+    const headers = {};
+    if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+    }
+    const url = endpoint.startsWith('http') ? endpoint : `https://api.openf1.org/v1${endpoint}`;
+    
+    let response = await fetch(url, { headers });
+
+    // Auto-retry on 401 (Unauthorized)
+    if (response.status === 401 && retry) {
+        console.warn("Token expired or invalid. Retrying...");
+        token = await getOpenF1Token(true); // Force refresh
+        if (token) {
+            headers['Authorization'] = `Bearer ${token}`;
+            response = await fetch(url, { headers });
+        }
+    }
+    return response;
+}
+
 async function fetchNextSession() {
     try {
-        const year = new Date().getFullYear();
-        // ดึงข้อมูล Session ทั้งหมด (FP1, FP2, Quali, Race ฯลฯ)
-        const response = await fetch(`https://api.openf1.org/v1/sessions?year=${year}`);
-        const data = await response.json();
+        let year = new Date().getFullYear();
+        // ใช้ OpenF1 แบบมี Auth
+        let response = await fetchOpenF1(`/sessions?year=${year}`);
+        let data = response.ok ? await response.json() : [];
         
+        if (!Array.isArray(data)) data = [];
+
         const now = new Date();
-        // กรองเอาเฉพาะอนาคต และเรียงตามเวลา
-        const upcoming = data
+        let upcoming = data
             .filter(s => new Date(s.date_start) > now)
             .sort((a, b) => new Date(a.date_start) - new Date(b.date_start));
 
+        // ถ้าปีนี้ไม่มีแข่งแล้ว ให้ลองดูปีหน้า
+        if (upcoming.length === 0) {
+            year++;
+            response = await fetchOpenF1(`/sessions?year=${year}`);
+            if (response.ok) {
+                data = await response.json();
+                if (Array.isArray(data)) {
+                    upcoming = data.filter(s => new Date(s.date_start) > now).sort((a, b) => new Date(a.date_start) - new Date(b.date_start));
+                }
+            }
+        }
+
         if (upcoming.length === 0) return;
 
-        const next = upcoming[0];
-        setupCountdown(next);
+        setupCountdown(upcoming[0]);
     } catch (error) {
         console.error("Countdown Error:", error);
     }
@@ -84,6 +209,7 @@ async function fetchNews() {
         const rssUrl = 'https://www.motorsport.com/rss/f1/news/';
         // ใช้ rss2json API เพื่อแปลง RSS เป็น JSON (ฟรี)
         const response = await fetch(`https://api.rss2json.com/v1/api.json?rss_url=${encodeURIComponent(rssUrl)}`);
+        if (!response.ok) throw new Error(`RSS API Error: ${response.status}`);
         const data = await response.json();
 
         if (data.status !== 'ok') throw new Error('Failed to fetch RSS');
@@ -112,165 +238,90 @@ async function fetchNews() {
     }
 }
 
-// ตัวแปรเก็บข้อมูลคลิปทั้งหมดเพื่อใช้ในการ Filter
-let allHighlights = [];
-
-// 1.2 ดึงคลิปไฮไลท์จาก YouTube (Official F1 Channel)
-async function fetchHighlights() {
-    const container = document.getElementById('highlights-container');
-    
-    try {
-        // เปลี่ยนมาใช้ Channel ของ beIN SPORTS Thailand
-        const channelId = 'UCjKaVLLwalH_DSCHaricw3w';
-        const rssUrl = `https://www.youtube.com/feeds/videos.xml?channel_id=${channelId}`;
-        
-        // ใช้ corsproxy.io แทน (เสถียรกว่าสำหรับ YouTube RSS)
-        const response = await fetch(`https://corsproxy.io/?url=${encodeURIComponent(rssUrl)}`);
-        if (!response.ok) throw new Error('Network response was not ok');
-        const text = await response.text();
-
-        // แปลง XML String เป็น DOM Object
-        const parser = new DOMParser();
-        const xmlDoc = parser.parseFromString(text, "text/xml");
-        const entries = Array.from(xmlDoc.querySelectorAll("entry"));
-
-        // เก็บข้อมูลลงตัวแปร global พร้อมจัดหมวดหมู่
-        allHighlights = entries.map(entry => {
-            let category = 'General';
-            const title = entry.querySelector("title").textContent;
-            const link = entry.querySelector("link").getAttribute("href");
-            const pubDate = entry.querySelector("published").textContent;
-            
-            const lowerTitle = title.toLowerCase();
-
-            // กรองเฉพาะคลิปที่มีคำว่า F1 หรือ Formula 1 และไม่ใช่ Shorts
-            if ((!lowerTitle.includes('f1') && !lowerTitle.includes('formula 1') && !lowerTitle.includes('formula1')) || lowerTitle.includes('#shorts') || lowerTitle.includes('shorts')) {
-                return null;
-            }
-            
-            if (lowerTitle.includes('ไฮไลท์') || lowerTitle.includes('highlights') || lowerTitle.includes('qualifying') || lowerTitle.includes('race') || lowerTitle.includes('sprint')) {
-                category = 'Highlights';
-            } else if (lowerTitle.includes('ซ้อม') || lowerTitle.includes('practice') || lowerTitle.includes('fp1') || lowerTitle.includes('fp2') || lowerTitle.includes('fp3')) {
-                category = 'Practice';
-            } else if (lowerTitle.includes('สัมภาษณ์') || lowerTitle.includes('interview') || lowerTitle.includes('reaction')) {
-                category = 'Interview';
-            }
-
-            return { 
-                title: title, 
-                link: link, 
-                pubDate: pubDate, 
-                category: category 
-            };
-        }).filter(item => item !== null); // กรองค่า null ออก
-
-        // แสดงผลทั้งหมดก่อน
-        renderHighlights(allHighlights);
-        
-    } catch (error) {
-        console.error('Highlights Error:', error);
-        container.innerHTML = '<div class="col-span-full text-red-400 text-center py-4">ไม่สามารถโหลดคลิปได้</div>';
-    }
-}
-
-// ฟังก์ชันสำหรับ Filter คลิป
-function filterHighlights(category) {
-    // อัปเดตปุ่ม Active
-    document.querySelectorAll('.filter-btn').forEach(btn => {
-        if (btn.dataset.category === category) {
-            btn.classList.add('bg-[#e10600]', 'text-white');
-            btn.classList.remove('bg-gray-800', 'text-gray-300');
-        } else {
-            btn.classList.remove('bg-[#e10600]', 'text-white');
-            btn.classList.add('bg-gray-800', 'text-gray-300');
-        }
-    });
-
-    const filtered = category === 'all' ? allHighlights : allHighlights.filter(h => h.category === category);
-    renderHighlights(filtered);
-}
-
-function renderHighlights(items) {
-    const container = document.getElementById('highlights-container');
-    
-    if (items.length === 0) {
-        container.innerHTML = '<div class="col-span-full text-center text-gray-500 py-8">ไม่พบคลิปในหมวดหมู่นี้</div>';
-        return;
-    }
-
-    let html = '';
-    // แสดงสูงสุด 4 คลิป (ลดจำนวนลงเพื่อให้ดูไม่รก)
-    items.slice(0, 4).forEach(item => {
-        const date = new Date(item.pubDate);
-        const timeStr = date.toLocaleDateString('th-TH', { day: 'numeric', month: 'short' });
-        
-        const videoId = item.link.split('v=')[1];
-        const thumbUrl = `https://i.ytimg.com/vi/${videoId}/mqdefault.jpg`;
-
-        let catColor = 'bg-gray-600';
-        if (item.category === 'Highlights') catColor = 'bg-[#e10600]';
-        if (item.category === 'Practice') catColor = 'bg-blue-600';
-        if (item.category === 'Interview') catColor = 'bg-green-600';
-
-        html += `
-            <div onclick="playVideo('${videoId}')" class="glass-card block rounded-xl overflow-hidden hover:border-[#e10600] transition duration-300 group flex flex-col h-full cursor-pointer">
-                <div class="relative aspect-video">
-                    <img src="${thumbUrl}" alt="${item.title}" class="w-full h-full object-cover group-hover:scale-105 transition duration-500">
-                    <div class="absolute inset-0 bg-black/30 group-hover:bg-black/10 transition flex items-center justify-center">
-                        <div class="w-10 h-10 bg-[#e10600]/90 rounded-full flex items-center justify-center text-white shadow-lg group-hover:scale-110 transition">
-                            <i class="fa-solid fa-play text-xs"></i>
-                        </div>
-                    </div>
-                    <div class="absolute top-2 left-2 ${catColor} text-white text-[9px] px-2 py-0.5 rounded font-bold uppercase tracking-wider shadow-sm">
-                        ${item.category}
-                    </div>
-                </div>
-                <div class="p-3 flex flex-col flex-grow">
-                    <div class="text-[10px] text-gray-400 font-bold uppercase tracking-wider mb-1">${timeStr}</div>
-                    <h3 class="text-sm font-bold text-white leading-snug line-clamp-2 group-hover:text-[#e10600] transition mb-1">${item.title}</h3>
-                </div>
-            </div>
-        `;
-    });
-    container.innerHTML = html;
-}
-
-// ฟังก์ชันเล่นวิดีโอใน Modal
-function playVideo(videoId) {
-    const modal = document.getElementById('video-modal');
-    const container = document.getElementById('video-player-container');
-    
-    // Embed YouTube Video (autoplay=1 เพื่อให้เล่นเลย)
-    container.innerHTML = `<iframe src="https://www.youtube.com/embed/${videoId}?autoplay=1&rel=0" title="YouTube video player" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen class="w-full h-full"></iframe>`;
-    
-    modal.classList.remove('hidden');
-    modal.classList.add('flex');
-}
-
-function closeVideoModal() {
-    const modal = document.getElementById('video-modal');
-    const container = document.getElementById('video-player-container');
-    
-    modal.classList.add('hidden');
-    modal.classList.remove('flex');
-    container.innerHTML = ''; // ล้าง iframe เพื่อหยุดวิดีโอ
-}
-
 // 1.5 ดึงผลการแข่งขันล่าสุด (Latest Result) - เพื่อให้เห็นข้อมูลปัจจุบัน
 async function fetchLastRace() {
+    const container = document.getElementById('last-race-container');
     try {
-        // ใส่ ?t=... เพื่อป้องกัน Cache
-        const response = await fetch(`https://ergast.com/api/f1/current/last/results.json?t=${Date.now()}`);
-        const data = await response.json();
-        const race = data.MRData.RaceTable.Races[0];
-        
-        if (!race) return;
+        // 1. ค้นหา Race ล่าสุดที่จบไปแล้ว (ไม่เอา Practice/Qualifying)
+        let year = new Date().getFullYear();
+        let sessionRes = await fetchOpenF1(`/sessions?year=${year}&session_type=Race`);
+        let sessions = sessionRes.ok ? await sessionRes.json() : [];
 
-        const winner = race.Results[0];
-        const second = race.Results[1];
-        const third = race.Results[2];
+        // ถ้าปีนี้ยังไม่มีแข่ง หรือไม่เจอข้อมูล ให้ลองดูปีที่แล้ว
+        if (!Array.isArray(sessions) || sessions.length === 0) {
+            year--;
+            sessionRes = await fetchOpenF1(`/sessions?year=${year}&session_type=Race`);
+            sessions = sessionRes.ok ? await sessionRes.json() : [];
+        }
 
-        const container = document.getElementById('last-race-container');
+        if (!Array.isArray(sessions) || sessions.length === 0) {
+            container.innerHTML = '<div class="text-center text-gray-500 py-8">No session data found.</div>';
+            return;
+        }
+
+        // กรองเฉพาะที่จบแล้ว และเรียงจากล่าสุด
+        const now = new Date();
+        const completedRaces = sessions
+            .filter(s => new Date(s.date_end) < now)
+            .sort((a, b) => new Date(b.date_start) - new Date(a.date_start));
+
+        if (completedRaces.length === 0) {
+            container.innerHTML = '<div class="text-center text-gray-500 py-8">No completed races found.</div>';
+            return;
+        }
+
+        const lastRace = completedRaces[0];
+
+        // ดึงข้อมูลนักขับและตำแหน่ง
+        // CHANGE: ใช้ session_key ดึงข้อมูลนักขับ (เหมือนกับที่ใช้ใน Standings แล้วเวิร์ค)
+        const [driversRes, resultRes] = await Promise.all([
+            fetchOpenF1(`/drivers?session_key=${lastRace.session_key}`),
+            fetchOpenF1(`/session_result?session_key=${lastRace.session_key}`)
+        ]);
+
+        let drivers = driversRes.ok ? await driversRes.json() : [];
+        const resultsData = resultRes.ok ? await resultRes.json() : [];
+
+        // Fallback: ถ้าดึงจาก Session ไม่ได้ (API เอ๋อ) ค่อยลองดึงแบบ Year
+        if (!Array.isArray(drivers) || drivers.length === 0) {
+            const yearDriversRes = await fetchOpenF1(`/drivers?year=${lastRace.year}`);
+            if (yearDriversRes.ok) {
+                drivers = await yearDriversRes.json();
+            }
+        }
+
+        // Map ข้อมูลนักขับ
+        const driverMap = {};
+        if (Array.isArray(drivers)) {
+            drivers.forEach(d => driverMap[String(d.driver_number)] = d);
+        }
+
+        // เรียงลำดับ 1-3
+        const results = resultsData
+            .map(r => ({ ...r, driverInfo: driverMap[String(r.driver_number)] }))
+            .filter(p => p.driverInfo && p.position) // กรองเฉพาะที่มีข้อมูลนักขับและมีตำแหน่ง (ป้องกัน null/0)
+            .sort((a, b) => a.position - b.position);
+
+        if (results.length < 3) {
+            container.innerHTML = '<div class="text-center text-gray-500 py-8">ข้อมูลผลการแข่งขันไม่สมบูรณ์</div>';
+            return;
+        }
+
+        const winner = results[0];
+        const second = results[1];
+        const third = results[2];
+
+        // Helper for safe display
+        const getInfo = (d) => ({
+            name: d.broadcast_name || d.full_name || d.last_name || d.name_acronym || 'Unknown',
+            team: d.team_name || 'Unknown Team',
+            img: d.headshot_url ? `<img src="${d.headshot_url}" class="w-full h-full object-cover">` : (d.name_acronym || '?')
+        });
+
+        const d1 = getInfo(winner.driverInfo);
+        const d2 = getInfo(second.driverInfo);
+        const d3 = getInfo(third.driverInfo);
+
         container.innerHTML = `
             <div class="bg-gradient-to-r from-[#15151e] to-[#2a2a35] p-0 rounded-2xl border border-gray-700 shadow-2xl relative overflow-hidden group">
                 <!-- Background Effect -->
@@ -279,12 +330,12 @@ async function fetchLastRace() {
                 <div class="relative z-10 p-6 md:p-8">
                     <div class="flex flex-col md:flex-row justify-between items-start md:items-center mb-8">
                         <div>
-                            <span class="text-[#e10600] font-bold text-xs uppercase tracking-[0.2em] mb-1 block">Last Race Result</span>
-                            <h3 class="text-3xl md:text-4xl font-black italic text-white uppercase">${race.raceName}</h3>
-                            <p class="text-gray-400 text-sm mt-1 flex items-center gap-2"><i class="fa-solid fa-location-dot"></i> ${race.Circuit.circuitName}</p>
+                            <span class="text-[#e10600] font-bold text-xs uppercase tracking-[0.2em] mb-1 block">${lastRace.session_name} Result</span>
+                            <h3 class="text-3xl md:text-4xl font-black italic text-white uppercase">${lastRace.location} GP</h3>
+                            <p class="text-gray-400 text-sm mt-1 flex items-center gap-2"><i class="fa-solid fa-location-dot"></i> ${lastRace.circuit_short_name}</p>
                 </div>
                         <div class="mt-4 md:mt-0">
-                            <span class="bg-white text-black text-xs px-3 py-1 rounded font-bold uppercase tracking-wider">Round ${race.round}</span>
+                            <span class="bg-white text-black text-xs px-3 py-1 rounded font-bold uppercase tracking-wider">Finished</span>
                         </div>
                     </div>
 
@@ -292,27 +343,30 @@ async function fetchLastRace() {
                         <!-- 2nd -->
                         <div class="flex-1 text-center order-1">
                             <div class="text-gray-500 text-xs font-bold mb-2 uppercase tracking-wider">2nd Place</div>
-                            <div class="w-16 h-16 md:w-20 md:h-20 mx-auto bg-gray-800 rounded-full border-2 border-gray-500 flex items-center justify-center text-xl font-black italic mb-3 shadow-lg">${second.Driver.code}</div>
-                            <div class="font-bold text-sm md:text-base truncate text-gray-300">${second.Driver.familyName}</div>
-                            <div class="text-[10px] text-gray-500 uppercase">${second.Constructors[0].name}</div>
+                            <div class="w-16 h-16 md:w-20 md:h-20 mx-auto bg-gray-800 rounded-full border-2 border-gray-500 flex items-center justify-center text-xl font-black italic mb-3 shadow-lg overflow-hidden">
+                                ${d2.img}
+                            </div>
+                            <div class="font-bold text-sm md:text-base truncate text-gray-300">${d2.name}</div>
+                            <div class="text-[10px] text-gray-500 uppercase">${d2.team}</div>
                         </div>
                         <!-- Winner -->
                         <div class="flex-1 text-center order-2 transform -translate-y-2">
                             <div class="text-[#e10600] text-2xl mb-2"><i class="fa-solid fa-crown"></i></div>
-                            <div class="w-24 h-24 md:w-28 md:h-28 mx-auto bg-gray-800 rounded-full border-4 border-[#e10600] flex items-center justify-center text-3xl font-black italic mb-3 shadow-[0_0_20px_rgba(225,6,0,0.4)] text-white relative">
-                                ${winner.Driver.code}
+                            <div class="w-24 h-24 md:w-28 md:h-28 mx-auto bg-gray-800 rounded-full border-4 border-[#e10600] flex items-center justify-center text-3xl font-black italic mb-3 shadow-[0_0_20px_rgba(225,6,0,0.4)] text-white relative overflow-hidden">
+                                ${d1.img}
                                 <div class="absolute -bottom-3 bg-[#e10600] text-white text-[10px] px-2 py-0.5 rounded font-bold">WINNER</div>
                             </div>
-                            <div class="font-black text-lg md:text-xl truncate text-white uppercase">${winner.Driver.familyName}</div>
-                            <div class="text-xs text-[#e10600] font-bold uppercase mt-1">${winner.Constructors[0].name}</div>
-                            <div class="text-xs text-gray-400 font-mono mt-1 bg-black/30 inline-block px-2 py-1 rounded">${winner.Time ? winner.Time.time : 'Winner'}</div>
+                            <div class="font-black text-lg md:text-xl truncate text-white uppercase">${d1.name}</div>
+                            <div class="text-xs text-[#e10600] font-bold uppercase mt-1">${d1.team}</div>
                         </div>
                         <!-- 3rd -->
                         <div class="flex-1 text-center order-3">
                             <div class="text-gray-500 text-xs font-bold mb-2 uppercase tracking-wider">3rd Place</div>
-                            <div class="w-16 h-16 md:w-20 md:h-20 mx-auto bg-gray-800 rounded-full border-2 border-orange-700 flex items-center justify-center text-xl font-black italic mb-3 shadow-lg">${third.Driver.code}</div>
-                            <div class="font-bold text-sm md:text-base truncate text-gray-300">${third.Driver.familyName}</div>
-                            <div class="text-[10px] text-gray-500 uppercase">${third.Constructors[0].name}</div>
+                            <div class="w-16 h-16 md:w-20 md:h-20 mx-auto bg-gray-800 rounded-full border-2 border-orange-700 flex items-center justify-center text-xl font-black italic mb-3 shadow-lg overflow-hidden">
+                                ${d3.img}
+                            </div>
+                            <div class="font-bold text-sm md:text-base truncate text-gray-300">${d3.name}</div>
+                            <div class="text-[10px] text-gray-500 uppercase">${d3.team}</div>
                         </div>
                     </div>
                 </div>
@@ -320,7 +374,7 @@ async function fetchLastRace() {
         `;
     } catch (e) {
         console.error(e);
-        document.getElementById('last-race-container').innerHTML = '<div class="text-red-400 text-center">ไม่สามารถโหลดผลล่าสุดได้</div>';
+        container.innerHTML = '<div class="text-red-400 text-center">ไม่สามารถโหลดผลล่าสุดได้</div>';
     }
 }
 
@@ -370,26 +424,25 @@ function getWeatherIcon(code) {
 // 2. ดึงข้อมูลตารางแข่ง (Schedule) จาก OpenF1 API
 async function fetchSchedule() {
     try {
-        // ใช้ OpenF1 API ดึงข้อมูล Session ของปีปัจจุบัน
+        // ใช้ OpenF1 API ดึงข้อมูล Session ของปีปัจจุบัน (แบบ Auth)
         const year = new Date().getFullYear();
-        const response = await fetch(`https://api.openf1.org/v1/sessions?year=${year}&session_type=Race`);
-        const data = await response.json();
+        const response = await fetchOpenF1(`/sessions?year=${year}&session_type=Race`);
+        const data = response.ok ? await response.json() : [];
         
-        // OpenF1 ส่งข้อมูลมาทุกสนาม เราต้องกรองเอาเฉพาะอนาคต
+        if (!Array.isArray(data)) throw new Error("No schedule data");
+
         const now = new Date();
         
-        // เรียงตามวันที่
-        data.sort((a, b) => new Date(a.date_start) - new Date(b.date_start));
-
         const upcoming = data.filter(session => {
             const raceDate = new Date(session.date_start);
             return raceDate >= now;
-        }).slice(0, 4); // เอาแค่ 4 สนามถัดไป
+        }).sort((a, b) => new Date(a.date_start) - new Date(b.date_start))
+          .slice(0, 4); // เอาแค่ 4 สนามถัดไป
 
         const container = document.getElementById('race-container');
         
         if (upcoming.length === 0) {
-            container.innerHTML = '<p class="col-span-full text-center text-gray-400">จบฤดูกาลแล้ว รอติดตามปีหน้า!</p>';
+            container.innerHTML = '<div class="col-span-full text-center text-gray-500 py-8 glass-card rounded-xl">End of Season. See you next year!</div>';
             return;
         }
 
@@ -401,6 +454,7 @@ async function fetchSchedule() {
             
             // Logic ดึงสภาพอากาศ
             let weatherHtml = '';
+            // ใช้พิกัดจาก map เดิม
             const loc = circuitLocations[session.location] || circuitLocations[session.circuit_short_name];
             
             if (loc) {
@@ -431,7 +485,7 @@ async function fetchSchedule() {
             return `
                 <div class="glass-card p-5 rounded-xl hover:border-[#e10600] transition duration-300 group relative overflow-hidden">
                     <div class="absolute top-0 right-0 p-2 opacity-5 text-6xl font-black italic text-white select-none -mr-4 -mt-2">
-                        ${session.country_code || 'F1'}
+                        F1
                     </div>
                     <div class="flex justify-between items-start mb-2">
                         <span class="text-[10px] font-bold text-[#e10600] uppercase tracking-widest">Upcoming</span>
@@ -457,172 +511,201 @@ async function fetchSchedule() {
 }
 
 // 3. ดึงข้อมูลคะแนนสะสม (Standings)
+let fullStandingsData = []; // To store calculated standings
+
 async function fetchStandings() {
+    const container = document.getElementById('standings-container');
+    container.innerHTML = '<tr><td colspan="3" class="p-4 text-center text-gray-500"><div class="loader"></div><br>Calculating Standings...</td></tr>';
+
     try {
-        const response = await fetch(`https://ergast.com/api/f1/current/driverStandings.json?t=${Date.now()}`);
-        const data = await response.json();
-        let standings = [];
+        let year = new Date().getFullYear();
+        const racePoints = { 1: 25, 2: 18, 3: 15, 4: 12, 5: 10, 6: 8, 7: 6, 8: 4, 9: 2, 10: 1 };
+        const sprintPoints = { 1: 8, 2: 7, 3: 6, 4: 5, 5: 4, 6: 3, 7: 2, 8: 1 };
 
-        // ลองดึงข้อมูลตารางคะแนนก่อน
-        if (data.MRData.StandingsTable.StandingsLists && data.MRData.StandingsTable.StandingsLists.length > 0) {
-            standings = data.MRData.StandingsTable.StandingsLists[0].DriverStandings;
-        }
+        // 1. Get all drivers for the season from the latest session
+        let allSessions = [];
         
-        // ตรวจสอบว่าเริ่มแข่งขันหรือยัง (มีคะแนนเกิดขึ้นหรือยัง)
-        const hasPoints = standings.some(d => parseFloat(d.points) > 0);
+        // ลองดึงปีปัจจุบัน
+        try {
+            const res = await fetchOpenF1(`/sessions?year=${year}`);
+            if (res.ok) allSessions = await res.json();
+        } catch (e) {}
 
-        // ถ้ายังไม่มีคะแนน หรือตารางคะแนนว่างเปล่า ให้ไปดึงรายชื่อนักแข่งทั้งหมดมาแสดงแทน
-        if (!hasPoints || standings.length === 0) {
-            const driversRes = await fetch(`https://ergast.com/api/f1/current/drivers.json?t=${Date.now()}`);
-            const driversData = await driversRes.json();
-            if (driversData.MRData.DriverTable.Drivers) {
-                standings = driversData.MRData.DriverTable.Drivers.map(d => ({
-                    position: '-',
-                    points: '0',
-                    Driver: d,
-                    Constructors: [] // Endpoint นี้ไม่มีข้อมูลทีม, ใส่เป็น array ว่าง
-                }));
-            }
-            // ถ้ายังไม่มีคะแนน ให้เรียงตามชื่อ (Alphabetical) และแสดงทั้งหมด
-            standings.sort((a, b) => a.Driver.givenName.localeCompare(b.Driver.givenName));
-        } else {
-            // ถ้ามีคะแนนแล้ว ให้ตัดมาแค่ Top 10 ตามเดิม
-            standings = standings.slice(0, 10);
+        // เช็คว่ามีการแข่งที่จบไปแล้วหรือยัง ถ้าไม่มีเลย ให้ไปดึงปีที่แล้ว
+        const now = new Date();
+        let hasCompletedRaces = Array.isArray(allSessions) && allSessions.some(s => new Date(s.date_end) < now);
+
+        if (!hasCompletedRaces) {
+            year = year - 1;
+            try {
+                const res = await fetchOpenF1(`/sessions?year=${year}`);
+                if (res.ok) allSessions = await res.json();
+            } catch (e) {}
         }
 
-        const container = document.getElementById('standings-container');
-        let html = '';
-        
-        standings.forEach((driver, index) => {
-            const isFirst = hasPoints && driver.position === '1';
-            const posClass = isFirst ? 'text-[#e10600] text-lg' : 'text-gray-400';
-            const rowClass = isFirst ? 'bg-[#e10600]/10' : '';
-            const posDisplay = hasPoints ? driver.position : (index + 1);
-            const pointsDisplay = hasPoints ? driver.points : '-';
-            // ป้องกัน Error กรณีไม่มีข้อมูลทีม
-            const teamName = (driver.Constructors && driver.Constructors.length > 0) ? driver.Constructors[0].name : 'N/A';
-            
-            html += `
-                <tr class="hover:bg-white/5 transition cursor-pointer group ${rowClass}" onclick="showDriverProfile('${driver.Driver.driverId}')">
-                    <td class="px-2 py-3 font-black italic ${posClass} text-center">${posDisplay}</td>
-                    <td class="px-2 py-3">
-                        <div class="font-bold text-sm text-gray-200 group-hover:text-[#e10600] transition uppercase">${driver.Driver.givenName} <span class="text-white">${driver.Driver.familyName}</span></div>
-                        <div class="text-[10px] text-gray-500 uppercase tracking-wider">${teamName}</div>
-                    </td>
-                    <td class="px-2 py-3 text-right font-mono font-bold text-[#e10600]">${pointsDisplay}</td>
-                </tr>
-            `;
+        if (!Array.isArray(allSessions) || allSessions.length === 0) throw new Error("No session data");
+
+        allSessions.sort((a, b) => new Date(b.date_start) - new Date(a.date_start));
+        const latestSessionKey = allSessions[0].session_key;
+
+        const driversRes = await fetchOpenF1(`/drivers?session_key=${latestSessionKey}`);
+        const drivers = await driversRes.json();
+        if (!Array.isArray(drivers)) throw new Error("Could not fetch drivers.");
+
+        const standingsMap = {};
+        drivers.forEach(d => {
+            standingsMap[d.driver_number] = {
+                ...d,
+                points: 0,
+                wins: 0,
+                position: 0
+            };
         });
-        container.innerHTML = html;
+
+        // 2. Get all completed Race and Sprint sessions
+        const completedRaces = allSessions.filter(s => s.session_type === 'Race' && new Date(s.date_end) < now);
+        const completedSprints = allSessions.filter(s => s.session_type === 'Sprint' && new Date(s.date_end) < now);
+
+        // 3. Calculate points for each session
+        const allCompletedSessions = [...completedRaces, ...completedSprints];
+
+        // Use Promise.all for parallel fetching to speed up
+        await Promise.all(allCompletedSessions.map(async (session) => {
+            try {
+                const resRes = await fetchOpenF1(`/session_result?session_key=${session.session_key}`);
+                if (!resRes.ok) return;
+                const results = await resRes.json();
+                if (!Array.isArray(results)) return;
+
+                results.forEach(r => {
+                    const driverNum = r.driver_number;
+                    if (standingsMap[driverNum] && r.position) {
+                        let pointsToAdd = 0;
+                        if (session.session_type === 'Race') {
+                            pointsToAdd = racePoints[r.position] || 0;
+                            if (r.position === 1) {
+                                standingsMap[driverNum].wins += 1;
+                            }
+                        } else if (session.session_type === 'Sprint') {
+                            pointsToAdd = sprintPoints[r.position] || 0;
+                        }
+                        standingsMap[driverNum].points += pointsToAdd;
+                    }
+                });
+            } catch (e) {
+                console.error(`Error processing session ${session.session_key}`, e);
+            }
+        }));
+
+        // 4. Finalize and sort
+        const standingsArray = Object.values(standingsMap);
+        standingsArray.sort((a, b) => b.points - a.points);
+        
+        standingsArray.forEach((d, index) => {
+            d.position = index + 1;
+        });
+
+        fullStandingsData = standingsArray; // Store for modal
+        
+        renderStandings();
+
     } catch (error) {
-        console.error('Error fetching standings:', error);
-        document.getElementById('standings-container').innerHTML = '<tr><td colspan="3" class="p-4 text-center text-red-400">โหลดข้อมูลไม่สำเร็จ</td></tr>';
+        console.error('Error fetching standings from OpenF1:', error);
+        container.innerHTML = '<tr><td colspan="3" class="p-4 text-center text-red-400">โหลดข้อมูลคะแนนไม่สำเร็จ</td></tr>';
     }
 }
 
+function renderStandings() {
+    const container = document.getElementById('standings-container');
+    const dataToRender = fullStandingsData.slice(0, 10); // Show top 10
+    const hasPoints = dataToRender.some(d => d.points > 0);
+    let html = '';
+
+    if (dataToRender.length === 0) {
+        container.innerHTML = '<tr><td colspan="3" class="p-4 text-center text-gray-500">ยังไม่มีข้อมูลคะแนน</td></tr>';
+        return;
+    }
+
+    dataToRender.forEach((driver, index) => {
+        const isFirst = hasPoints && driver.position === 1;
+        const posClass = isFirst ? 'text-[#e10600] text-lg' : 'text-gray-400';
+        const rowClass = isFirst ? 'bg-[#e10600]/10' : '';
+        const posDisplay = hasPoints ? driver.position : (index + 1);
+        const pointsDisplay = hasPoints ? driver.points : '-';
+        
+        html += `
+            <tr class="hover:bg-white/5 transition cursor-pointer group ${rowClass}" onclick="showDriverProfile(${driver.driver_number})">
+                <td class="px-2 py-3 font-black italic ${posClass} text-center">${posDisplay}</td>
+                <td class="px-2 py-3">
+                    <div class="font-bold text-sm text-gray-200 group-hover:text-[#e10600] transition uppercase">${driver.first_name} <span class="text-white">${driver.last_name}</span></div>
+                    <div class="text-[10px] text-gray-500 uppercase tracking-wider">${driver.team_name}</div>
+                </td>
+                <td class="px-2 py-3 text-right font-mono font-bold text-[#e10600]">${pointsDisplay}</td>
+            </tr>
+        `;
+    });
+    container.innerHTML = html;
+}
+
 // 4. ฟังก์ชันจัดการ Modal และดึงข้อมูลนักแข่ง
-async function showDriverProfile(driverId) {
+async function showDriverProfile(driverNumber) {
     const modal = document.getElementById('driver-modal');
     const content = document.getElementById('modal-content');
     
-    // เปิด Modal
     modal.classList.remove('hidden');
     modal.classList.add('flex');
     content.innerHTML = '<div class="loader mt-4"></div><p class="mt-4 text-gray-400 text-sm">กำลังโหลดข้อมูลนักแข่ง...</p>';
 
     try {
-        // 1. ดึงข้อมูลส่วนตัวนักแข่ง
-        const driverRes = await fetch(`https://ergast.com/api/f1/drivers/${driverId}.json`);
-        const driverData = await driverRes.json();
-        const driver = driverData.MRData.DriverTable.Drivers[0];
+        // Find the driver data from our pre-calculated standings
+        const driver = fullStandingsData.find(d => d.driver_number === driverNumber);
 
-        // 2. ดึงข้อมูลทีมและคะแนนล่าสุด (เจาะจงเฉพาะนักแข่งคนนี้)
-        const standingRes = await fetch(`https://ergast.com/api/f1/current/drivers/${driverId}/driverStandings.json`);
-        const standingData = await standingRes.json();
-        
-        let team = 'Unknown Team';
-        let points = '0';
-        let position = '-';
-        let wins = '0';
-
-        // ตรวจสอบว่ามีข้อมูลคะแนนหรือไม่
-        if (standingData.MRData.StandingsTable.StandingsLists.length > 0) {
-            const standing = standingData.MRData.StandingsTable.StandingsLists[0].DriverStandings[0];
-            team = standing.Constructors[0].name;
-            points = standing.points;
-            position = standing.position;
-            wins = standing.wins;
-        } else {
-            // ถ้าไม่มีคะแนน (เริ่มฤดูกาลใหม่) ให้ลองดึงชื่อทีมอย่างเดียว
-            const constructorRes = await fetch(`https://ergast.com/api/f1/current/drivers/${driverId}/constructors.json`);
-            const constructorData = await constructorRes.json();
-            if (constructorData.MRData.ConstructorTable.Constructors.length > 0) {
-                team = constructorData.MRData.ConstructorTable.Constructors[0].name;
-            }
+        if (!driver) {
+            throw new Error("Driver data not found in standings.");
         }
 
-        // 3. ดึงรูปภาพจาก Wikipedia API
-        let imageUrl = 'https://placehold.co/600x800/1e1e24/FFF?text=No+Image'; // รูปสำรอง
-        if (driver.url) {
-            try {
-                // แกะชื่อจาก URL Wikipedia (เช่น Max_Verstappen)
-                const wikiTitle = driver.url.split('/').pop();
-                // เรียก API Wikipedia เพื่อเอารูป Thumbnail ขนาดใหญ่ (600px)
-                const wikiRes = await fetch(`https://en.wikipedia.org/w/api.php?action=query&titles=${wikiTitle}&prop=pageimages&format=json&pithumbsize=600&origin=*`);
-                const wikiData = await wikiRes.json();
-                const pages = wikiData.query.pages;
-                const pageId = Object.keys(pages)[0];
-                if (pages[pageId].thumbnail) {
-                    imageUrl = pages[pageId].thumbnail.source;
-                }
-            } catch (e) { console.error('Wiki Image Error', e); }
-        }
-
-        // คำนวณอายุ
-        const dob = new Date(driver.dateOfBirth);
-        const age = new Date().getFullYear() - dob.getFullYear();
+        // Use headshot_url from OpenF1 data
+        const imageUrl = driver.headshot_url || 'https://placehold.co/600x800/1e1e24/FFF?text=No+Image';
 
         content.innerHTML = `
             <div class="flex flex-col md:flex-row gap-0 md:gap-6 text-left h-full">
                 <!-- รูปภาพ (ซ้าย) -->
                 <div class="w-full md:w-5/12 relative bg-gradient-to-b from-gray-800 to-black min-h-[300px] md:min-h-full">
-                    <img src="${imageUrl}" alt="${driver.givenName}" class="w-full h-full object-cover absolute inset-0 mix-blend-overlay opacity-80 md:opacity-100 md:mix-blend-normal">
+                    <img src="${imageUrl}" alt="${driver.full_name}" class="w-full h-full object-cover absolute inset-0 mix-blend-overlay opacity-80 md:opacity-100 md:mix-blend-normal">
                     <div class="absolute bottom-0 left-0 w-full bg-gradient-to-t from-[#1e1e24] via-[#1e1e24]/80 to-transparent p-6 pt-20 md:hidden"></div>
                     <div class="absolute bottom-4 left-4 md:top-4 md:left-4 text-6xl font-black italic text-white/10 select-none z-0">
-                        ${driver.permanentNumber || ''}
+                        ${driver.driver_number || 'F1'}
                     </div>
                 </div>
                 
                 <!-- ข้อมูล (ขวา) -->
                 <div class="w-full md:w-7/12 flex flex-col justify-center p-6 md:pl-0 relative z-10 -mt-10 md:mt-0">
                     <div class="mb-6">
-                        <div class="text-[#e10600] font-bold text-xs uppercase tracking-[0.3em] mb-1">${driver.nationality}</div>
-                        <h2 class="text-4xl md:text-5xl font-black italic text-white uppercase leading-[0.9] mb-2 drop-shadow-lg">${driver.givenName}<br><span class="text-transparent bg-clip-text bg-gradient-to-r from-[#e10600] to-orange-500">${driver.familyName}</span></h2>
-                        <div class="text-xl text-gray-300 font-bold border-l-4 border-[#e10600] pl-3">${team}</div>
+                        <div class="text-[#e10600] font-bold text-xs uppercase tracking-[0.3em] mb-1">${driver.country_code || 'N/A'}</div>
+                        <h2 class="text-4xl md:text-5xl font-black italic text-white uppercase leading-[0.9] mb-2 drop-shadow-lg">${driver.first_name}<br><span class="text-transparent bg-clip-text bg-gradient-to-r from-[#e10600] to-orange-500">${driver.last_name}</span></h2>
+                        <div class="text-xl text-gray-300 font-bold border-l-4 border-[#e10600] pl-3">${driver.team_name}</div>
                     </div>
                     
                     <div class="grid grid-cols-2 gap-3 mb-6">
                         <div class="bg-black/40 p-3 rounded-lg border border-gray-700/50 backdrop-blur-sm">
                             <div class="text-[10px] text-gray-500 uppercase tracking-wider">Points</div>
-                            <div class="text-2xl font-bold text-white">${points}</div>
+                            <div class="text-2xl font-bold text-white">${driver.points}</div>
                         </div>
                         <div class="bg-black/40 p-3 rounded-lg border border-gray-700/50 backdrop-blur-sm">
                             <div class="text-[10px] text-gray-500 uppercase tracking-wider">Rank</div>
-                            <div class="text-2xl font-bold text-[#e10600]">#${position}</div>
+                            <div class="text-2xl font-bold text-[#e10600]">#${driver.position}</div>
                         </div>
                         <div class="bg-black/40 p-3 rounded-lg border border-gray-700/50 backdrop-blur-sm">
                             <div class="text-[10px] text-gray-500 uppercase tracking-wider">Wins</div>
-                            <div class="text-2xl font-bold text-white">${wins}</div>
+                            <div class="text-2xl font-bold text-white">${driver.wins}</div>
                         </div>
                         <div class="bg-black/40 p-3 rounded-lg border border-gray-700/50 backdrop-blur-sm">
-                            <div class="text-[10px] text-gray-500 uppercase tracking-wider">Age</div>
-                            <div class="text-2xl font-bold text-white">${age}</div>
+                            <div class="text-[10px] text-gray-500 uppercase tracking-wider">Number</div>
+                            <div class="text-2xl font-bold text-white">${driver.driver_number}</div>
                         </div>
                     </div>
 
-                    <a href="${driver.url}" target="_blank" class="inline-flex items-center justify-center gap-2 w-full bg-[#e10600] hover:bg-red-700 text-white font-bold py-3 px-4 rounded-xl transition shadow-lg hover:shadow-[#e10600]/30 uppercase tracking-wider text-sm group">
-                        Full Wiki Profile <i class="fa-solid fa-arrow-right group-hover:translate-x-1 transition-transform"></i>
-                    </a>
+                    <p class="text-center text-xs text-gray-600">Driver data from OpenF1 API.</p>
                 </div>
             </div>
         `;
@@ -643,150 +726,534 @@ document.getElementById('driver-modal').addEventListener('click', (e) => {
     if (e.target === e.currentTarget) closeModal();
 });
 
-// ปิด Video Modal เมื่อคลิกพื้นที่ว่างรอบนอก
-document.getElementById('video-modal')?.addEventListener('click', (e) => {
-    if (e.target === e.currentTarget) closeVideoModal();
-});
-
 // เริ่มทำงานเมื่อโหลดหน้าเว็บ
 document.addEventListener('DOMContentLoaded', () => {
     fetchNextSession(); // เรียกฟังก์ชันนับถอยหลัง
     fetchNews();
-    fetchHighlights(); // เรียกฟังก์ชันไฮไลท์
     fetchLastRace(); // เรียกฟังก์ชันใหม่
     fetchSchedule();
     fetchStandings();
 });
 
 // --- LIVE DASHBOARD LOGIC ---
-let dashboardInterval;
+let mqttClient = null;
+let dashboardInterval = null;
+let dashboardData = {
+    session: null,
+    drivers: [],
+    laps: {},
+    positions: {},
+    intervals: {}
+};
 
-function toggleDashboard(show) {
+// --- Telemetry Logic ---
+let telemetryChart = null;
+let selectedDriver = null; // เก็บ Driver Number ที่เลือก
+let selectedDriver2 = null; // เก็บ Driver Number คนที่ 2
+let telemetryDataBuffer = {}; // เก็บข้อมูลกราฟแยกตาม Driver Number { 1: [], 44: [] }
+
+async function toggleDashboard(show) {
     const dashboard = document.getElementById('live-dashboard');
     if (show) {
         dashboard.classList.add('active');
         document.body.style.overflow = 'hidden'; // ป้องกันหน้าหลักเลื่อน
-        fetchLiveTiming(); // โหลดข้อมูลทันที
-        // ตั้งเวลาโหลดอัตโนมัติทุก 10 วินาที
-        dashboardInterval = setInterval(fetchLiveTiming, 10000);
+        await initDashboard();
     } else {
         dashboard.classList.remove('active');
         document.body.style.overflow = '';
-        clearInterval(dashboardInterval);
+        
+        // Disconnect MQTT
+        if (mqttClient) {
+            mqttClient.end();
+            mqttClient = null;
+            console.log("MQTT Disconnected");
+        }
+        if (dashboardInterval) {
+            clearInterval(dashboardInterval);
+            dashboardInterval = null;
+        }
     }
 }
 
-async function fetchLiveTiming() {
+async function initDashboard() {
+    // Reset Data
+    dashboardData = { session: null, drivers: [], laps: {}, positions: {}, intervals: {} };
     const tbody = document.getElementById('timing-body');
     const headerName = document.getElementById('dash-session-name');
     const headerTrack = document.getElementById('dash-track');
     const statusEl = document.getElementById('dash-status');
+    const radioContainer = document.getElementById('dash-radio-container');
+
+    tbody.innerHTML = '<tr><td colspan="9" class="text-center py-8 text-gray-500"><div class="loader mx-auto mb-2"></div>Loading Session Data...</td></tr>';
 
     try {
-        // 1. ดึง Session ล่าสุด (หรือที่กำลังแข่งอยู่)
-        let year = new Date().getFullYear();
-        let sessionRes = await fetch(`https://api.openf1.org/v1/sessions?year=${year}`);
-        let sessions = await sessionRes.json();
-
-        // ถ้าปีนี้ยังไม่มีข้อมูล (ช่วงต้นปี/ปิดฤดูกาล) ให้ดึงข้อมูลปีที่แล้วมาแสดงเป็น Demo
-        if (sessions.length === 0) {
-            year = year - 1;
-            sessionRes = await fetch(`https://api.openf1.org/v1/sessions?year=${year}`);
-            sessions = await sessionRes.json();
+        // 1. ใช้ session_key=latest เพื่อดึง Session ล่าสุดจาก API โดยตรง
+        let sessionRes = await fetchOpenF1(`/sessions?session_key=latest`);
+        let sessions = sessionRes.ok ? await sessionRes.json() : [];
+        
+        if (!Array.isArray(sessions) || sessions.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="9" class="text-center py-4 text-gray-500">No session data found.</td></tr>';
+            return;
         }
-        
-        // เรียงตามเวลา เอาอันล่าสุด
-        const latestSession = sessions.sort((a, b) => new Date(a.date_start) - new Date(b.date_start)).pop();
-        
-        // ตรวจสอบว่ากำลังแข่งอยู่จริงหรือไม่
-        const now = new Date();
-        const endTime = new Date(latestSession.date_end);
-        // เพิ่ม Buffer 2 ชั่วโมงเผื่อดีเลย์
-        const isLive = now < new Date(endTime.getTime() + 2 * 60 * 60 * 1000);
 
+        let latestSession = sessions[0];
+        const now = new Date();
+        
+        if (!latestSession) {
+            tbody.innerHTML = '<tr><td colspan="9" class="text-center py-4 text-gray-500">No session data found.</td></tr>';
+            return;
+        }
+
+        dashboardData.session = latestSession;
+        
+        // Reset Telemetry
+        initTelemetryChart();
+
+        // Update Header
         headerName.innerText = `${latestSession.location} GP - ${latestSession.session_name}`;
         headerTrack.innerHTML = `<i class="fa-solid fa-location-dot"></i> ${latestSession.circuit_short_name}`;
-        
-        if (isLive) {
-            statusEl.innerHTML = '<span class="text-green-500 font-bold uppercase tracking-wider animate-pulse">LIVE</span>';
-        } else {
-            statusEl.innerHTML = '<span class="text-red-500 font-bold uppercase tracking-wider">REPLAY (OFFLINE)</span>';
+
+        // Check Status
+        const startTime = new Date(latestSession.date_start);
+        const endTime = new Date(latestSession.date_end);
+
+        if (now < startTime) {
+            statusEl.innerHTML = '<span class="text-yellow-500 font-bold uppercase tracking-wider">UPCOMING</span>';
+            tbody.innerHTML = `<tr><td colspan="9" class="text-center py-8 text-gray-400"><i class="fa-regular fa-clock text-4xl mb-2"></i><br>Session starts at ${startTime.toLocaleTimeString()}</td></tr>`;
+            return;
         }
 
-        // 2. ดึงข้อมูลนักแข่งใน Session นั้น
-        const driversRes = await fetch(`https://api.openf1.org/v1/drivers?session_key=${latestSession.session_key}`);
-        const drivers = await driversRes.json();
+        const isLive = now < new Date(endTime.getTime() + 2 * 60 * 60 * 1000);
 
-        // 3. ดึงข้อมูล Lap ล่าสุด (เพื่อเอาเวลา) - ดึงมาจำนวนหนึ่งแล้วกรองเอา
-        // หมายเหตุ: OpenF1 ไม่มี endpoint "current status" โดยตรง ต้องประยุกต์ใช้
-        // ในที่นี้จะดึง Laps ทั้งหมดแล้วหา Lap สุดท้ายของแต่ละคน (อาจจะช้าหน่อยสำหรับ Demo)
-        const lapsRes = await fetch(`https://api.openf1.org/v1/laps?session_key=${latestSession.session_key}`);
-        const laps = await lapsRes.json();
+        // 2. Fetch Drivers (Static per session)
+        const driversRes = await fetchOpenF1(`/drivers?session_key=${latestSession.session_key}`);
+        const driversData = await driversRes.json();
+        
+        if (Array.isArray(driversData)) {
+            dashboardData.drivers = driversData;
+        } else {
+            console.warn("Invalid drivers data:", driversData);
+            dashboardData.drivers = [];
+        }
 
-        // Map ข้อมูล Lap ล่าสุดของแต่ละคน
-        const driverLaps = {};
+        if (isLive) {
+            statusEl.innerHTML = '<span class="text-green-500 font-bold uppercase tracking-wider animate-pulse">LIVE (STREAMING)</span>';
+            
+            // Fetch Initial Snapshot
+            await fetchSnapshot(latestSession.session_key);
+            renderDashboardTable();
+
+            // Fetch Initial Radio
+            await fetchDashboardRadio(latestSession.session_key);
+            
+            // Connect MQTT for Real-time updates
+            connectMqtt(latestSession.session_key);
+            
+            // Default select leader (if available later) or first driver
+            if (dashboardData.drivers.length > 0) {
+                selectDriver(dashboardData.drivers[0].driver_number);
+            }
+
+            // FIX: Polling backup (every 10s) to ensure data updates if MQTT fails
+            if (dashboardInterval) clearInterval(dashboardInterval);
+            dashboardInterval = setInterval(() => {
+                const nowIso = new Date(Date.now() - 60000).toISOString(); // Fetch last 1 min
+                fetchSnapshot(latestSession.session_key, `&date>=${nowIso}`);
+            }, 10000);
+        } else {
+            statusEl.innerHTML = '<span class="text-red-500 font-bold uppercase tracking-wider">REPLAY (OFFLINE)</span>';
+            
+            // Replay Mode: Fetch Windowed Data (Final Classification)
+            // FIX: Widen window to 30 mins before end to ensure we capture final positions
+            const windowStart = new Date(endTime.getTime() - 30 * 60 * 1000).toISOString();
+            const windowEnd = new Date(endTime.getTime() + 10 * 60 * 1000).toISOString();
+            const dateFilter = `&date>=${windowStart}&date<=${windowEnd}`;
+            
+            await fetchSnapshot(latestSession.session_key, dateFilter);
+            renderDashboardTable();
+
+            // Fetch Radio for Replay
+            await fetchDashboardRadio(latestSession.session_key);
+        }
+
+    } catch (error) {
+        console.error("Dashboard Error:", error);
+        let msg = error.message;
+        if (msg.includes("API Restricted")) {
+            msg = `<span class="font-bold text-lg">Live Timing Unavailable</span><br>OpenF1 API restricts free access during live sessions.<br><span class="text-sm text-gray-400">Please use the official F1 App or wait until the session ends.</span>`;
+        }
+        tbody.innerHTML = `<tr><td colspan="9" class="text-center py-8 text-red-400">${msg}</td></tr>`;
+    }
+}
+
+async function fetchSnapshot(sessionKey, filter = '') {
+    // Fetch latest state for Laps, Intervals, Position
+    const [lapsRes, posRes, intRes] = await Promise.all([
+        fetchOpenF1(`/laps?session_key=${sessionKey}${filter}`),
+        fetchOpenF1(`/position?session_key=${sessionKey}${filter}`),
+        fetchOpenF1(`/intervals?session_key=${sessionKey}${filter}`)
+    ]);
+
+    const laps = await lapsRes.json().catch(e => []);
+    const positions = await posRes.json().catch(e => []);
+    const intervals = await intRes.json().catch(e => []);
+
+    // Process Laps
+    if (Array.isArray(laps)) {
         laps.forEach(lap => {
-            if (!driverLaps[lap.driver_number] || lap.lap_number > driverLaps[lap.driver_number].lap_number) {
-                driverLaps[lap.driver_number] = lap;
+            if (!dashboardData.laps[lap.driver_number] || lap.lap_number > dashboardData.laps[lap.driver_number].lap_number) {
+                dashboardData.laps[lap.driver_number] = lap;
             }
         });
-
-        // 4. ดึง Position (อันดับ)
-        const posRes = await fetch(`https://api.openf1.org/v1/position?session_key=${latestSession.session_key}`);
-        const positions = await posRes.json();
-        
-        // หา Position ล่าสุดของแต่ละคน
-        const currentPos = {};
+    }
+    
+    // Process Positions
+    if (Array.isArray(positions)) {
         positions.forEach(p => {
-             // เก็บ timestamp ล่าสุด
-             if (!currentPos[p.driver_number] || new Date(p.date) > new Date(currentPos[p.driver_number].date)) {
-                 currentPos[p.driver_number] = p;
-             }
+            if (!dashboardData.positions[p.driver_number] || new Date(p.date) > new Date(dashboardData.positions[p.driver_number].date)) {
+                dashboardData.positions[p.driver_number] = p;
+            }
         });
+    }
 
-        // รวมข้อมูลและสร้างตาราง
-        let tableHtml = '';
+    // Process Intervals
+    if (Array.isArray(intervals)) {
+        intervals.forEach(i => {
+            if (!dashboardData.intervals[i.driver_number] || new Date(i.date) > new Date(dashboardData.intervals[i.driver_number].date)) {
+                dashboardData.intervals[i.driver_number] = i;
+            }
+        });
+    }
+}
+
+async function fetchDashboardRadio(sessionKey) {
+    const container = document.getElementById('dash-radio-container');
+    if (!container) return;
+    
+    try {
+        // Fetch last 20 radio messages
+        const res = await fetchOpenF1(`/team_radio?session_key=${sessionKey}`);
+        const data = res.ok ? await res.json() : [];
         
-        // แปลง drivers เป็น array และเรียงตาม position
-        const sortedDrivers = drivers.sort((a, b) => {
-            const posA = currentPos[a.driver_number] ? currentPos[a.driver_number].position : 99;
-            const posB = currentPos[b.driver_number] ? currentPos[b.driver_number].position : 99;
+        container.innerHTML = '';
+        if (data.length === 0) {
+            container.innerHTML = '<div class="text-center text-xs text-gray-500 py-4">No radio data available.</div>';
+            return;
+        }
+
+        // Sort by date desc (newest first)
+        const sorted = data.sort((a, b) => new Date(b.date) - new Date(a.date)).slice(0, 20);
+        
+        sorted.forEach(radio => addRadioToDashboard(radio, false));
+
+    } catch (e) {
+        console.error("Radio Fetch Error", e);
+    }
+}
+
+function addRadioToDashboard(radio, animate = true) {
+    const container = document.getElementById('dash-radio-container');
+    if (!container) return;
+
+    // Find driver info
+    const driver = dashboardData.drivers.find(d => d.driver_number == radio.driver_number);
+    const tla = driver ? driver.name_acronym : 'UNK';
+    const color = driver ? `#${driver.team_colour}` : '#666';
+    const time = new Date(radio.date).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit', second:'2-digit'});
+
+    const div = document.createElement('div');
+    div.className = `bg-[#1f1f2e] p-2 rounded border-l-4 flex justify-between items-center ${animate ? 'animate-pulse' : ''}`;
+    div.style.borderColor = color;
+    div.innerHTML = `
+        <div class="flex flex-col">
+            <div class="flex items-center gap-2">
+                <span class="font-bold text-xs text-white bg-black/30 px-1 rounded">${tla}</span>
+                <span class="text-[10px] text-gray-500 font-mono">${time}</span>
+            </div>
+        </div>
+        <button class="text-gray-400 hover:text-[#e10600] transition px-2" onclick="playRadio(this, '${radio.recording_url}')">
+            <i class="fa-solid fa-circle-play text-xl"></i>
+        </button>
+    `;
+
+    // Prepend to top
+    container.insertBefore(div, container.firstChild);
+    
+    // Remove animation after a while
+    if (animate) {
+        setTimeout(() => div.classList.remove('animate-pulse'), 2000);
+    }
+}
+
+function initTelemetryChart() {
+    const ctx = document.getElementById('telemetryChart').getContext('2d');
+    
+    if (telemetryChart) {
+        telemetryChart.destroy();
+    }
+
+    telemetryChart = new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels: [],
+            datasets: [{
+                label: 'Driver 1',
+                data: [],
+                borderColor: '#e10600',
+                backgroundColor: 'rgba(225, 6, 0, 0.05)',
+                borderWidth: 2,
+                pointRadius: 0,
+                tension: 0.4,
+                fill: false
+            },
+            {
+                label: 'Driver 2',
+                data: [],
+                borderColor: '#3b82f6', // สีฟ้า
+                backgroundColor: 'rgba(59, 130, 246, 0.05)',
+                borderWidth: 2,
+                pointRadius: 0,
+                tension: 0.4,
+                fill: false
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            animation: false, // ปิด Animation เพื่อประสิทธิภาพ Real-time
+            interaction: {
+                mode: 'index',
+                intersect: false,
+            },
+            plugins: {
+                legend: { display: false },
+                tooltip: { enabled: true }
+            },
+            scales: {
+                x: {
+                    display: false, // ซ่อนแกน X (เวลา) เพื่อความสะอาด
+                    grid: { display: false }
+                },
+                y: {
+                    grid: { color: '#333' },
+                    ticks: { color: '#888' },
+                    beginAtZero: false
+                }
+            }
+        }
+    });
+    telemetryDataBuffer = {};
+}
+
+function selectDriver(driverNumber) {
+    // Logic การเลือก 2 คน
+    if (selectedDriver == driverNumber) {
+        // ถ้าคลิกคนเดิม (คนแรก) -> ยกเลิกคนแรก (เลื่อนคนที่ 2 มาแทนถ้ามี)
+        selectedDriver = selectedDriver2;
+        selectedDriver2 = null;
+    } else if (selectedDriver2 == driverNumber) {
+        // ถ้าคลิกคนเดิม (คนที่ 2) -> ยกเลิกคนที่ 2
+        selectedDriver2 = null;
+    } else {
+        // เลือกคนใหม่
+        if (!selectedDriver) {
+            selectedDriver = driverNumber;
+        } else if (!selectedDriver2) {
+            selectedDriver2 = driverNumber;
+        } else {
+            // ถ้าเลือกครบ 2 คนแล้ว ให้แทนที่คนที่ 2
+            selectedDriver2 = driverNumber;
+        }
+    }
+
+    // เคลียร์ Buffer ของคนที่เลือกใหม่ (เพื่อให้กราฟเริ่มวาดใหม่)
+    if (selectedDriver && !telemetryDataBuffer[selectedDriver]) telemetryDataBuffer[selectedDriver] = [];
+    if (selectedDriver2 && !telemetryDataBuffer[selectedDriver2]) telemetryDataBuffer[selectedDriver2] = [];
+    
+    // อัปเดตชื่อบนหัวกราฟ
+    updateTelemetryHeader();
+    
+    // รีเฟรชตารางเพื่อแสดง Highlight
+    renderDashboardTable();
+}
+
+function updateTelemetryHeader() {
+    const nameEl = document.getElementById('telemetry-driver-name');
+    if (!nameEl) return;
+
+    const d1 = dashboardData.drivers.find(d => d.driver_number == selectedDriver);
+    const d2 = dashboardData.drivers.find(d => d.driver_number == selectedDriver2);
+
+    if (d1 && d2) {
+        nameEl.innerHTML = `<span style="color:#ffcccc">${d1.name_acronym}</span> <span class="text-white text-[10px]">VS</span> <span style="color:#cceeff">${d2.name_acronym}</span>`;
+        nameEl.style.background = `linear-gradient(90deg, #e10600 50%, #3b82f6 50%)`;
+    } else if (d1) {
+        nameEl.innerText = `${d1.name_acronym} - ${d1.last_name.toUpperCase()}`;
+        nameEl.style.background = `#${d1.team_colour}`;
+    } else {
+        nameEl.innerText = 'SELECT DRIVER';
+        nameEl.style.background = '#333';
+    }
+}
+
+async function connectMqtt(sessionKey) {
+    const token = await getOpenF1Token();
+    if (!token) return;
+
+    const options = {
+        username: CONFIG.OPENF1_USER,
+        password: token
+    };
+
+    // Connect to OpenF1 MQTT over Websockets
+    mqttClient = mqtt.connect('wss://mqtt.openf1.org:8084/mqtt', options);
+
+    mqttClient.on('connect', () => {
+        console.log('MQTT Connected');
+        // Subscribe to topics
+        mqttClient.subscribe('v1/laps');
+        mqttClient.subscribe('v1/position');
+        mqttClient.subscribe('v1/intervals');
+        mqttClient.subscribe('v1/team_radio');
+        mqttClient.subscribe('v1/car_data'); // Subscribe Telemetry
+    });
+
+    mqttClient.on('message', (topic, message) => {
+        const msg = JSON.parse(message.toString());
+        
+        // Filter by session
+        if (msg.session_key != sessionKey) return;
+
+        const driverNum = msg.driver_number;
+        
+        if (topic === 'v1/laps') {
+            // Only update if lap number is >= current
+            if (!dashboardData.laps[driverNum] || msg.lap_number >= dashboardData.laps[driverNum].lap_number) {
+                dashboardData.laps[driverNum] = msg;
+            }
+        } else if (topic === 'v1/position') {
+            dashboardData.positions[driverNum] = msg;
+        } else if (topic === 'v1/intervals') {
+            dashboardData.intervals[driverNum] = msg;
+        } else if (topic === 'v1/team_radio') {
+            addRadioToDashboard(msg, true);
+        } else if (topic === 'v1/car_data') {
+            // Update Telemetry if it matches selected driver
+            if ((selectedDriver && driverNum == selectedDriver) || (selectedDriver2 && driverNum == selectedDriver2)) {
+                const speed = msg.speed;
+                const time = new Date(msg.date).toLocaleTimeString();
+                
+                // Push to buffer
+                if (!telemetryDataBuffer[driverNum]) telemetryDataBuffer[driverNum] = [];
+                telemetryDataBuffer[driverNum].push({ time, speed });
+                
+                // Keep only last 100 points (~30-60 seconds depending on rate)
+                if (telemetryDataBuffer[driverNum].length > 100) telemetryDataBuffer[driverNum].shift();
+            }
+        }
+
+        // Trigger Render (Throttled via requestAnimationFrame)
+        requestRender();
+    });
+}
+
+let renderPending = false;
+function requestRender() {
+    if (!renderPending) {
+        renderPending = true;
+        requestAnimationFrame(() => {
+            renderDashboardTable();
+            renderPending = false;
+            
+            // Update Chart here as well
+            if (telemetryChart) {
+                // Dataset 1 (Red)
+                if (selectedDriver && telemetryDataBuffer[selectedDriver]) {
+                    telemetryChart.data.labels = telemetryDataBuffer[selectedDriver].map(d => d.time); // Use labels from driver 1
+                    telemetryChart.data.datasets[0].data = telemetryDataBuffer[selectedDriver].map(d => d.speed);
+                } else {
+                    telemetryChart.data.datasets[0].data = [];
+                }
+
+                // Dataset 2 (Blue)
+                if (selectedDriver2 && telemetryDataBuffer[selectedDriver2]) {
+                    // If driver 1 is empty, use driver 2 labels
+                    if (!selectedDriver) telemetryChart.data.labels = telemetryDataBuffer[selectedDriver2].map(d => d.time);
+                    telemetryChart.data.datasets[1].data = telemetryDataBuffer[selectedDriver2].map(d => d.speed);
+                } else {
+                    telemetryChart.data.datasets[1].data = [];
+                }
+                telemetryChart.update();
+            }
+        });
+    }
+}
+
+function renderDashboardTable() {
+    const tbody = document.getElementById('timing-body');
+    let tableHtml = '';
+    
+    // Sort drivers by position
+    const sortedDrivers = (dashboardData.drivers || []).sort((a, b) => {
+        const posA = dashboardData.positions[a.driver_number] ? dashboardData.positions[a.driver_number].position : 99;
+        const posB = dashboardData.positions[b.driver_number] ? dashboardData.positions[b.driver_number].position : 99;
             return posA - posB;
         });
 
         sortedDrivers.forEach((driver, index) => {
-            const lap = driverLaps[driver.driver_number] || {};
-            const pos = currentPos[driver.driver_number] ? currentPos[driver.driver_number].position : '-';
+            const lap = dashboardData.laps[driver.driver_number] || {};
+            const pos = dashboardData.positions[driver.driver_number] ? dashboardData.positions[driver.driver_number].position : '-';
             
             // สีทีม (ถ้ามีข้อมูล) หรือ default
             const teamColor = '#' + (driver.team_colour || 'ffffff');
             
-            // คำนวณ Gap (สมมติ)
-            const gap = index === 0 ? 'Leader' : `+${(Math.random() * 2).toFixed(3)}`; // Demo Gap
+            // ดึงข้อมูล Gap จริงจาก API
+            const intervalData = dashboardData.intervals[driver.driver_number];
+            let gap = '-';
+            let interval = '-';
+
+            if (intervalData) {
+                gap = intervalData.gap_to_leader !== null ? `+${parseFloat(intervalData.gap_to_leader).toFixed(3)}` : 'Leader';
+                interval = intervalData.interval !== null ? `+${parseFloat(intervalData.interval).toFixed(3)}` : '-';
+                if (index === 0) { gap = 'Leader'; interval = '-'; }
+            } else {
+                gap = index === 0 ? 'Leader' : '-';
+            }
+
+            // จัดการชื่อนักแข่งให้แสดงผลถูกต้องที่สุด (Logic แบบละเอียด)
+            let driverName = driver.broadcast_name;
+            if (!driverName) driverName = driver.full_name;
+            if (!driverName && driver.first_name && driver.last_name) driverName = `${driver.first_name} ${driver.last_name}`;
+            if (!driverName) driverName = driver.name_acronym;
+            if (!driverName) driverName = 'Unknown';
             
+            // Highlight Selected Row
+            let rowClass = 'hover:bg-[#222] border-l-4 border-transparent';
+            if (selectedDriver == driver.driver_number) {
+                rowClass = 'bg-white/10 border-l-4 border-[#e10600]'; // สีแดงสำหรับคนแรก
+            } else if (selectedDriver2 == driver.driver_number) {
+                rowClass = 'bg-white/10 border-l-4 border-[#3b82f6]'; // สีฟ้าสำหรับคนที่สอง
+            }
+
             tableHtml += `
-                <tr class="timing-row">
-                    <td class="text-center font-bold text-gray-400">${pos}</td>
+                <tr class="timing-row cursor-pointer transition ${rowClass}" onclick="selectDriver(${driver.driver_number})">
+                    <td class="text-center font-bold">${pos}</td>
                     <td class="font-mono font-bold" style="color:${teamColor}">${driver.driver_number}</td>
                     <td>
-                        <div class="font-bold text-white leading-tight">${driver.name_acronym}</div>
+                        <div class="font-bold text-white leading-tight">${driverName}</div>
                         <div class="text-[10px] text-gray-500 uppercase">${driver.team_name || ''}</div>
                     </td>
-                    <td class="text-right font-mono text-gray-300 text-xs">${gap}</td>
-                    <td class="text-right font-mono text-gray-300 text-xs">${index === 0 ? '-' : '+0.5s'}</td>
+                    <td class="text-right font-mono text-xs">${gap}</td>
+                    <td class="text-right font-mono text-xs">${interval}</td>
                     <td class="text-center font-mono text-xs"><span class="sector-dot bg-sector-green"></span>${lap.duration_sector_1 || '-'}</td>
                     <td class="text-center font-mono text-xs"><span class="sector-dot bg-sector-yellow"></span>${lap.duration_sector_2 || '-'}</td>
                     <td class="text-center font-mono text-xs"><span class="sector-dot bg-sector-purple"></span>${lap.duration_sector_3 || '-'}</td>
-                    <td class="text-right font-mono font-bold text-white pr-4">${lap.lap_duration ? (lap.lap_duration).toFixed(3) : '-'}</td>
+                    <td class="text-right font-mono font-bold text-white pr-4">${(lap.lap_duration && typeof lap.lap_duration === 'number') ? lap.lap_duration.toFixed(3) : '-'}</td>
                 </tr>
             `;
         });
 
-        tbody.innerHTML = tableHtml;
-
-    } catch (error) {
-        console.error("Dashboard Error:", error);
-    }
+    tbody.innerHTML = tableHtml;
 }
 
 // --- LANGUAGE TRANSLATION ---
