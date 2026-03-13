@@ -11,6 +11,7 @@ function parseJwt(token) {
 }
 
 let openF1Token = (typeof CONFIG !== 'undefined' && CONFIG.ACCESS_TOKEN) ? CONFIG.ACCESS_TOKEN : null;
+let openF1User = (typeof CONFIG !== 'undefined' && CONFIG.OPENF1_USER) ? CONFIG.OPENF1_USER : null;
 let tokenExpiry = 0;
 if (openF1Token) {
     const decoded = parseJwt(openF1Token);
@@ -18,8 +19,6 @@ if (openF1Token) {
 }
 
 async function getOpenF1Token(forceRefresh = false) {
-    if (typeof CONFIG === 'undefined' || !CONFIG.OPENF1_USER) return null;
-
     const now = Date.now() / 1000;
     
     if (!forceRefresh && openF1Token && now < (tokenExpiry - 60)) {
@@ -27,26 +26,41 @@ async function getOpenF1Token(forceRefresh = false) {
     }
 
     try {
-        const params = new URLSearchParams();
-        params.append("username", CONFIG.OPENF1_USER);
-        params.append("password", CONFIG.OPENF1_PASS);
+        let data;
 
-        const response = await fetch("https://api.openf1.org/token", {
-            method: "POST",
-            headers: { "Content-Type": "application/x-www-form-urlencoded" },
-            body: params,
-        });
+        // ตรวจสอบว่ามี CONFIG แบบเดิมหรือไม่ (สำหรับการเทส Local แบบง่าย)
+        if (typeof CONFIG !== 'undefined' && CONFIG.OPENF1_USER && CONFIG.OPENF1_PASS) {
+            const params = new URLSearchParams();
+            params.append("username", CONFIG.OPENF1_USER);
+            params.append("password", CONFIG.OPENF1_PASS);
 
-        if (response.ok) {
-            const data = await response.json();
-            openF1Token = data.access_token;
-            const decoded = parseJwt(openF1Token);
-            tokenExpiry = decoded ? decoded.exp : (now + 3600);
-            return openF1Token;
+            const response = await fetch("https://api.openf1.org/token", {
+                method: "POST",
+                headers: { "Content-Type": "application/x-www-form-urlencoded" },
+                body: params,
+            });
+            if (!response.ok) throw new Error(await response.text());
+            data = await response.json();
         } else {
-            console.error("OpenF1 Auth Failed:", await response.text());
-            return null;
+            // ถ้าไม่มี CONFIG ให้ยิงไปที่ Vercel Serverless Function (/api/token)
+            if (window.location.protocol === 'file:') {
+                console.warn("⚠️ คุณกำลังเปิดไฟล์ผ่าน file:// ทำให้ไม่สามารถเรียก /api/token ได้");
+                console.warn("👉 วิธีแก้: 1. ใช้ 'vercel dev' หรือ 2. เปิด config.js ใน index.html กลับมาใช้ชั่วคราว");
+                throw new Error("Cannot use backend API on file:// protocol");
+            }
+            // หมายเหตุ: การเรียก /api/token จะทำงานได้เมื่อ Deploy บน Vercel หรือใช้คำสั่ง 'vercel dev' ในเครื่องเท่านั้น
+            // หากเปิดไฟล์ html ธรรมดา (file://) จะเกิด Error "Failed to fetch"
+            const response = await fetch("/api/token");
+            if (!response.ok) throw new Error("Failed to fetch token from backend");
+            data = await response.json();
         }
+
+        openF1Token = data.access_token;
+        if (data.username) openF1User = data.username; // บันทึก Username ที่ได้มา
+        
+        const decoded = parseJwt(openF1Token);
+        tokenExpiry = decoded ? decoded.exp : (now + 3600);
+        return openF1Token;
     } catch (e) {
         console.error("OpenF1 Auth Error:", e);
         return null;

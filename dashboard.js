@@ -432,7 +432,7 @@ async function connectMqtt(sessionKey) {
     if (!token) return;
 
     const options = {
-        username: CONFIG.OPENF1_USER,
+        username: typeof CONFIG !== 'undefined' ? CONFIG.OPENF1_USER : openF1User,
         password: token
     };
 
